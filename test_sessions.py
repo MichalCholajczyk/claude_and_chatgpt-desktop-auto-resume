@@ -9,6 +9,12 @@ import claude_auto_continue as app
 from session_automation import (Node, Pane, SessionEngine, SessionState, ClaudeUI,
                                 choose_reset, discover, final_limit_card, question_in,
                                 signals, usage_meter)
+from test_support import calm_desk
+
+
+def setUpModule():
+    unittest.addModuleCleanup(calm_desk())
+
 
 NOW = dt.datetime(2026, 9, 9, 14, 0)
 
@@ -69,9 +75,11 @@ def observed(**kwargs):
 class FixtureUI:
     def __init__(self):
         self.calls = []
+        self.messages = []
 
-    def resume(self, key, prefer_retry, api_error):
+    def resume(self, key, prefer_retry, api_error, message=None):
         self.calls.append((key, prefer_retry, api_error))
+        self.messages.append(message)
         return "message"
 
     def answer(self, key, fingerprint):
@@ -286,7 +294,8 @@ class SessionTests(unittest.TestCase):
         meter = usage_meter(q, app.parse_reset_time)
         self.assertEqual(meter["pct"], 19)
         self.assertEqual((meter["reset"].weekday(), meter["reset"].hour), (0, 18))
-        self.assertEqual(usage_meter(pane(), app.parse_reset_time), dict(pct=None, reset=None))
+        self.assertEqual(usage_meter(pane(), app.parse_reset_time),
+                         dict(pct=None, reset=None, context=None))
         r = pane()   # a full context window is not a plan limit
         node("Usage: context 100%, Weekly · all models: 19%", "ButtonControl", r.root)
         self.assertEqual(usage_meter(r, app.parse_reset_time)["pct"], 19)
@@ -681,6 +690,7 @@ class WorkerStartTests(unittest.TestCase):
         self.worker.log = Mock()
         self.worker.hwnd = 101
         self.worker.engine = Mock()
+        self.addCleanup(self.worker.release_window)   # watching claims window 101 for this copy
 
     def command(self, name, payload=None, seconds=0.0):
         self.worker.command(name, payload)

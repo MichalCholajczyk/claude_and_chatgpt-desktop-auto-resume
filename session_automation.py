@@ -6,9 +6,13 @@ again; ambiguous titles, drafts and unknown controls fail closed.
 from dataclasses import dataclass, field
 import datetime as dt
 import hashlib
+import os
 import re
 import time
 
+from handover import BLOCKED_PHASES, HandoverFlow, HandoverRefused, context_from_meter
+from input_guard import InputPaused
+from input_lock import input_lock, worker_cancelled
 from quota_log import QuotaLog
 
 
@@ -36,12 +40,38 @@ PERMANENT_ERROR = re.compile(r"\b(?:400|401|402|403|404|413|authentication_error
 LIMIT_HEADLINE = re.compile(r"(?:usage|session|weekly|(?:claude\s+)?(?:opus|sonnet|haiku|fable)"
                             r"(?:\s[\d.]+)?)\s+limit\s+reached", re.I)
 CARD_ACTIONS = {"try again", "view details", "hide details"}
+STOP_LABELS = {"stop", "stop response", "stop generating", "zatrzymaj"}
+# The sidebar button that starts a conversation, and how long its title may take.
+NEW_CHAT_LABELS = {"new", "new session", "new chat", "nowa", "nowa sesja", "nowy czat"}
+SHOW_SIDEBAR_LABELS = {"show sidebar", "pokaż pasek boczny", "pokaż pasek boczny"}
+NEW_TITLE_WAIT_S = 40
+# Buttons of the permission card ("Allow Claude to fetch …?") end with their key digit,
+# e.g. "Allow once 2" (captured 25.09); key names are stripped too, should a version
+# spell them out. The allow buttons in order of preference.
+KEY_HINTS = re.compile(r"(?:\s*(?:\d+|ctrl|shift|alt|esc|enter|return|[⏎↵⌘⇧⌃⌥+]))+\s*$", re.I)
+ALLOW = ("always allow", "allow once")
 USAGE_METER = re.compile(r"usage\s*[:,]", re.I)
-METER_CONTEXT = re.compile(r"context\s*:?\s*[\d.,]+\s*[km%]?", re.I)   # context window, not a plan limit
+# The context part of the meter ("Context 195.8k / 1M (20%)", or just "context 20%" in
+# older builds) is not a plan limit: its own percentage must never be read as a used-up
+# plan window, so the whole part is cut out before the percentages are collected.
+METER_CONTEXT = re.compile(r"context\s*:?\s*\d{1,3}\s*%|"
+                           r"context\s*:?\s*[\d.,]+\s*[km]?"
+                           r"(?:\s*/\s*[\d.,]+\s*[km]?)?(?:\s*\(\s*\d{1,3}\s*%\s*\))?", re.I)
+
+
+class WindowHidden(RuntimeError):
+    """The app window is fully covered or minimized. Chromium then hides the page and
+    exposes an empty document, so nothing in it can be read until it is visible."""
 
 
 def key_for(kind, title):
     return kind + ":" + title.strip()
+
+
+def content_hidden(root):
+    """True when every web document in the window is empty and has no size."""
+    documents = [n for n in root.walk() if n.type == "DocumentControl"]
+    return bool(documents) and all(not n.visible and not n.children for n in documents)
 
 
 @dataclass(eq=False)
@@ -172,6 +202,58 @@ def question_in(pane):
     return None
 
 
+def allow_name(name):
+    """True for a name like the permission card's allow buttons ("Allow once 2")."""
+    return KEY_HINTS.sub("", name).strip().casefold() in ALLOW
+
+
+def button_label(node):
+    """A button's own label: its first text, else its name without the key that
+    Claude's cards append ("Allow once 2" -> "Allow once")."""
+    text = next((n.name for n in node.walk() if n.type == "TextControl" and n.name.strip()), None)
+    return (text if text is not None else KEY_HINTS.sub("", node.name)).strip()
+
+
+def permission_in(pane):
+    """The live permission card: Deny plus "Always allow" and/or "Allow once", outside
+    the transcript. A question card never counts, even when its answers read like
+    permission buttons."""
+    composer_line = set(pane.prompt.ancestors())
+    for deny in pane.ui_nodes():
+        if deny.type != "ButtonControl" or button_label(deny).casefold() != "deny":
+            continue
+        # The card is the widest ancestor that does not also hold the composer.
+        card = deny
+        for ancestor in deny.ancestors():
+            if ancestor in composer_line:
+                break
+            card = ancestor
+        buttons = [n for n in card.walk() if n.type == "ButtonControl"]
+        if any(n.name == "Dismiss question" for n in buttons):
+            continue
+        labels = [button_label(n).casefold() for n in buttons]
+        found = {wanted: [b for b, label in zip(buttons, labels) if label == wanted]
+                 for wanted in ("deny", *ALLOW)}
+        if (len(found["deny"]) != 1 or not any(found[a] for a in ALLOW)
+                or any(len(found[a]) > 1 for a in ALLOW)):
+            continue
+        in_buttons = {n for b in buttons for n in b.walk()}
+        texts = [n.name.strip() for n in card.walk()
+                 if n.type == "TextControl" and n.name.strip() and n not in in_buttons]
+        # The question opens the card as a run of texts: "Allow Claude to ", "run", " ", what, "?".
+        lead = []
+        for child in card.children:
+            if child.type != "TextControl":
+                break
+            lead.append(child.name)
+        identity = "\n".join([*texts, *labels])
+        return dict(card=card, always=next(iter(found["always allow"]), None),
+                    once=next(iter(found["allow once"]), None),
+                    title=" ".join("".join(lead).split()) or next(iter(texts), ""),
+                    fingerprint=hashlib.sha256(identity.encode()).hexdigest())
+    return None
+
+
 def final_limit_card(pane, parse):
     """Claude Code ends a blocked conversation with a card in the transcript:
     "Session limit reached" / "Try again after your session limit resets." /
@@ -193,15 +275,37 @@ def final_limit_card(pane, parse):
     return True, next((r for r in resets if r), None)
 
 
+def meter_node(pane):
+    """The bottom-bar usage meter of this conversation, or None."""
+    return next((n for n in pane.ui_nodes() if n.type == "ButtonControl"
+                 and USAGE_METER.match(n.name)), None)
+
+
 def usage_meter(pane, parse):
-    """Highest percentage and reset time from the bottom-bar meter, e.g.
-    "Usage: Context 150k, 100% of 5-hour limit, Resets at 9:30 AM" or
-    "Usage, Weekly · all models: 19%, Resets Mon 6:00 PM"."""
-    meter = next((n for n in pane.ui_nodes() if n.type == "ButtonControl" and USAGE_METER.match(n.name)), None)
+    """Highest plan percentage, reset time and context reading from the bottom-bar
+    meter, e.g. "Usage: Context 195.8k / 1M (20%), 45% of 5-hour limit, Resets at
+    9:30 AM" or "Usage, Weekly · all models: 19%, Resets Mon 6:00 PM"."""
+    meter = meter_node(pane)
     if meter is None:
-        return dict(pct=None, reset=None)
+        return dict(pct=None, reset=None, context=None)
     percentages = [int(p) for p in re.findall(r"(\d{1,3})\s*%", METER_CONTEXT.sub("", meter.name))]
-    return dict(pct=max(percentages) if percentages else None, reset=parse(meter.name))
+    return dict(pct=max(percentages) if percentages else None, reset=parse(meter.name),
+                context=context_from_meter(meter.name))
+
+
+def last_reply_text(pane):
+    """All text of the conversation's last message, when that message is Claude's.
+
+    The handover marker is looked for here. Our own request quotes the marker's shape,
+    so a message of ours must never count as an answer.
+    """
+    articles = [n for n in pane.root.walk() if n.role == "article" and n.inside("chat messages")]
+    if not articles:
+        return ""
+    nodes = list(articles[-1].walk())
+    if any(n.name.startswith("You said:") for n in nodes):
+        return ""
+    return " ".join(n.name.strip() for n in nodes if n.name.strip())
 
 
 def choose_reset(candidates, now):
@@ -215,8 +319,11 @@ def choose_reset(candidates, now):
 def signals(pane, detect_banner):
     from claude_auto_continue import parse_reset_time
     question = question_in(pane)
-    question_nodes = set(question["group"].walk()) if question else set()
-    ui = [n for n in pane.ui_nodes() if n not in question_nodes and not rename_title(n)
+    permission = permission_in(pane)
+    card_nodes = set(question["group"].walk()) if question else set()
+    if permission:
+        card_nodes.update(permission["card"].walk())
+    ui = [n for n in pane.ui_nodes() if n not in card_nodes and not rename_title(n)
           and not n.name.startswith("More options for ") and n.type != "EditControl"
           and not any(a.type == "EditControl" or a.name == "Repository and pull request controls"
                       for a in n.ancestors())]
@@ -239,12 +346,15 @@ def signals(pane, detect_banner):
             errors.append(last.name)
     error = errors[-1] if errors else None
     card, card_reset = final_limit_card(pane, parse_reset_time)
-    return dict(limit=bool(banner) or card, reset=reset or card_reset, error=error,
+    meter = meter_node(pane)
+    return dict(context=context_from_meter(meter.name) if meter is not None else None,
+                last_text=last_reply_text(pane),
+                limit=bool(banner) or card, reset=reset or card_reset, error=error,
                 permanent=bool(error and PERMANENT_ERROR.search(error)),
                 retry=retries[0] if len(retries) == 1 else None,
                 busy=any(n.type == "ButtonControl" and n.name.casefold() in
                          {"stop", "stop response", "stop generating", "zatrzymaj"} for n in ui),
-                question=question)
+                question=question, permission=permission)
 
 
 class ClaudeUI:
@@ -275,19 +385,34 @@ class ClaudeUI:
             node.parent = stack[-1][1]
             node.parent.children.append(node)
             stack.append((depth, node))
+        if content_hidden(root):
+            raise WindowHidden("The app window is covered or minimized")
         return root
 
     def click(self, node):
         from claude_auto_continue import user32
         if self.worker._stop_event.is_set() or not self.worker.cmds.empty():
             raise RuntimeError("Pending command; action deferred")
+        # Checked again here, not only once per scan: someone may have grabbed the
+        # mouse in the middle of a read-click-type sequence.
+        if self.worker.guard.user_busy():
+            raise InputPaused("Someone is using the mouse; action deferred")
         self.worker._focus_window(self.worker.hwnd)
         if user32.GetForegroundWindow() != self.worker.hwnd:
             raise RuntimeError("Claude is not foreground")
         if not node.visible or not node.control.IsEnabled or node.control.IsOffscreen:
             raise RuntimeError("Control is unavailable")
         self.clicks += 1
-        node.control.Click(simulateMove=False)
+        with self.worker.guard.sending():
+            node.control.Click(simulateMove=False)
+
+    def press(self, keys, wait=0.1):
+        """Send keys to whatever has the focus, and record them as our own input."""
+        from claude_auto_continue import auto
+        if self.worker.guard.user_busy():
+            raise InputPaused("Someone is using the mouse; keys were not sent")
+        with self.worker.guard.sending():
+            auto.SendKeys(keys, waitTime=wait)
 
     def resolve(self, key, navigate=True):
         root = self.snapshot()
@@ -357,6 +482,7 @@ class ClaudeUI:
             if pattern and not pattern.IsReadOnly:
                 pattern.SetValue(text)
                 wrote_value = True
+                self.worker.guard.mark_own_input()
         except Exception:
             if self.value(node):
                 raise RuntimeError("Text write outcome is uncertain; leaving the draft untouched")
@@ -365,33 +491,187 @@ class ClaudeUI:
                 if (user32.GetForegroundWindow() != self.worker.hwnd or not node.control.HasKeyboardFocus
                         or self.worker._stop_event.is_set() or not self.worker.cmds.empty()):
                     raise RuntimeError("Input interrupted; message was not submitted")
-                auto.SendKeys(self.worker._escape_sendkeys(text[start:start + 32]), interval=0.001, waitTime=0.01)
+                if self.worker.guard.user_busy():
+                    raise InputPaused("Someone took the mouse; message was not submitted")
+                with self.worker.guard.sending():
+                    auto.SendKeys(self.worker._escape_sendkeys(text[start:start + 32]), interval=0.001, waitTime=0.01)
         if user32.GetForegroundWindow() != self.worker.hwnd or not node.control.HasKeyboardFocus:
             raise RuntimeError("Focus changed; message was not submitted")
         if self.value(node) != text:
             raise RuntimeError("Typed text could not be verified; message was not submitted")
 
-    def resume(self, key, prefer_retry=False, api_error=False):
-        from claude_auto_continue import auto, detect_limit_banner
+    def send(self, pane, message):
+        """Type one message into this conversation and submit it. Returns what was sent.
+
+        Enter submits in the composer, so the text goes in as a single line: line breaks
+        would send it half-written.
+        """
+        text = " ".join((message or "").split())
+        if not text:
+            raise RuntimeError("Nothing to send")
+        self.type_into(pane.prompt, text)
+        if self.worker._stop_event.is_set() or not self.worker.cmds.empty():
+            raise RuntimeError("Pending command; message was not submitted")
+        self.press("{Enter}")
+        return text
+
+    def stop(self, pane):
+        """Interrupt the agent's work in this conversation. True when Stop was clicked."""
+        buttons = [n for n in pane.ui_nodes() if n.type == "ButtonControl"
+                   and n.name.strip().casefold() in STOP_LABELS and n.visible]
+        if len(buttons) != 1:
+            return False
+        self.click(buttons[0])
+        return True
+
+    def resume(self, key, prefer_retry=False, api_error=False, message=None):
+        """Continue a conversation that stopped. `message` overrides the user's text (the
+        handover asks for its own message); then the retry button is never used, because
+        it would repeat the interrupted request instead of asking anything."""
+        from claude_auto_continue import DEFAULT_MESSAGE, detect_limit_banner
         pane = self.resolve(key)
         if pane is None:
             raise RuntimeError("Selected conversation is missing or ambiguous")
         state = signals(pane, detect_limit_banner)
-        if state["question"] or state["busy"]:
+        if state["question"] or state["permission"] or state["busy"]:
             return "busy"
         if self.value(pane.prompt):
             raise RuntimeError("Existing draft; leaving it untouched")
-        if state["retry"] and (prefer_retry or api_error):
-            self.click(state["retry"])
-            return "retry"
-        if api_error and not state["error"]:
-            return "cleared"
-        message = " ".join((self.worker.cfg.get("message") or "continue").split())
-        self.type_into(pane.prompt, message)
-        if self.worker._stop_event.is_set() or not self.worker.cmds.empty():
-            raise RuntimeError("Pending command; message was not submitted")
-        auto.SendKeys("{Enter}", waitTime=0.1)
+        if not message:
+            if state["retry"] and (prefer_retry or api_error):
+                self.click(state["retry"])
+                return "retry"
+            if api_error and not state["error"]:
+                return "cleared"
+        self.send(pane, message or self.worker.cfg.get("message") or DEFAULT_MESSAGE)
         return "message"
+
+    # ------------------------------------------------- starting a conversation
+    def panes(self, root=None):
+        """Conversation panes of this app's window (ChatGPT's adapter reads its own)."""
+        return discover(root if root is not None else self.snapshot())[0]
+
+    def new_session_screen(self, root):
+        """(prompt, project button) of the screen a new conversation starts on.
+
+        It has no title yet, so `discover` does not see it as a pane. Measured layout
+        (26.09): the group that holds the composer also holds, in this order, where to
+        run it, the project, the branch box, "worktree" and "Add another folder" — so the
+        project is the last button before the branch box.
+        """
+        taken = {pane.prompt for pane in self.panes(root)}
+        prompts = [n for n in root.walk() if n.type == "EditControl" and n.visible
+                   and n.name.casefold() in PROMPTS and n not in taken]
+        if len(prompts) != 1:
+            return None, None
+        prompt = prompts[0]
+        node = prompt.parent
+        for _ in range(8):
+            if node is None:
+                break
+            combos = [i for i, child in enumerate(node.children) if child.type == "ComboBoxControl"]
+            if combos:
+                buttons = [child for child in node.children[:combos[0]]
+                           if child.type == "ButtonControl" and child.visible]
+                return prompt, (buttons[-1] if buttons else None)
+            node = node.parent
+        return prompt, None
+
+    @staticmethod
+    def new_chat_buttons(root):
+        return [n for n in root.walk() if n.type == "ButtonControl" and n.visible
+                and n.name.strip().casefold() in NEW_CHAT_LABELS and n.inside("sidebar")]
+
+    def show_sidebar(self, root):
+        """Unfold the sidebar when the window is too narrow to keep it open. Returns the
+        window as it is afterwards (unchanged when there is nothing to unfold)."""
+        toggles = [n for n in root.walk() if n.type == "ButtonControl" and n.visible
+                   and n.name.strip().casefold() in SHOW_SIDEBAR_LABELS]
+        if len(toggles) != 1:
+            return root
+        self.click(toggles[0])
+        time.sleep(0.6)
+        return self.snapshot()
+
+    def pick_project(self, button, wanted):
+        """Choose the project by folder name from the button's own menu. The menu lists
+        folder names, so it is compared with the folder the handover was written in."""
+        self.click(button)
+        for _ in range(6):
+            time.sleep(0.4)
+            root = self.snapshot()
+            menus = [n for n in root.walk() if n.type == "MenuControl" or n.role == "menu"]
+            items = [n for menu in menus for n in menu.walk()
+                     if n.type in ("RadioButtonControl", "MenuItemControl", "ListItemControl")
+                     and n.name.strip().casefold() == wanted and n.visible]
+            if len(items) == 1:
+                self.click(items[0])
+                time.sleep(0.8)
+                return True
+            if menus and items:
+                break                 # more than one match: never guess
+        self.press("{Esc}")           # never leave a menu open behind us
+        return False
+
+    def new_chat(self, key, project_root, message):
+        """Start a conversation in the same project as `key` and send it `message`.
+
+        Returns the new conversation's key, or "" when its title has not settled yet.
+        Raises HandoverRefused when the window cannot confirm the project or the screen:
+        a message sent into the wrong project would be worse than no message at all.
+        """
+        wanted = os.path.basename(os.path.normpath(project_root or "")).casefold()
+        if not wanted:
+            raise HandoverRefused("The handover names no project folder")
+        pane = self.resolve(key)
+        if pane is None:
+            raise HandoverRefused("The conversation the handover came from is missing")
+        if self.value(pane.prompt):
+            raise RuntimeError("Existing draft; leaving it untouched")
+        self.click(pane.prompt)       # this pane's turn: the new conversation opens here
+        root = self.snapshot()
+        before = {p.key for p in self.panes(root)}
+        buttons = self.new_chat_buttons(root)
+        if len(buttons) != 1:
+            # A narrow window keeps the sidebar folded away, and with it the button that
+            # starts a conversation. Unfold it and look again.
+            root = self.show_sidebar(root)
+            buttons = self.new_chat_buttons(root)
+        if len(buttons) != 1:
+            raise HandoverRefused("Cannot tell which button starts a new conversation")
+        self.click(buttons[0])
+        prompt, project = None, None
+        for _ in range(6):
+            time.sleep(0.5)
+            prompt, project = self.new_session_screen(self.snapshot())
+            if prompt is not None and project is not None:
+                break
+        if prompt is None or project is None:
+            raise HandoverRefused("The new conversation's screen could not be read")
+        if project.name.strip().casefold() != wanted:
+            if not self.pick_project(project, wanted):
+                raise HandoverRefused("The project of the handover is not on the list")
+            prompt, project = self.new_session_screen(self.snapshot())
+            if prompt is None or project is None or project.name.strip().casefold() != wanted:
+                raise HandoverRefused("The new conversation is not in the project of the handover")
+        self.send(Pane("", "", "", root, prompt), message)
+        return self.settled_key(before)
+
+    def settled_key(self, before, wait_s=NEW_TITLE_WAIT_S):
+        """The key of the conversation that appeared, once the app has named it."""
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            if self.worker._stop_event.is_set() or not self.worker.cmds.empty():
+                return ""
+            try:
+                panes = self.panes()
+            except Exception:
+                continue
+            fresh = [p.key for p in panes if p.key not in before]
+            if len(fresh) == 1:
+                return fresh[0]
+        return ""
 
     def answer(self, key, fingerprint):
         """Answer the live question card with its recommended choice, or ask
@@ -469,6 +749,62 @@ class ClaudeUI:
                 return True
         raise RuntimeError("Answer click was not accepted")
 
+    def approve(self, key, card):
+        """Allow a live permission card: "Always allow" when it is offered, else "Allow
+        once"; never "Deny". Invoke first — it needs neither the focus nor the mouse —
+        and a real click only when Claude ignored it. Returns "always" or "once"."""
+        choice = "always" if card["always"] else "once"
+        if self.invoke(card[choice]) and self._permission_gone(key, card["fingerprint"]):
+            return choice
+        current = self._same_permission(key, card["fingerprint"])
+        if current is None:
+            return choice
+        self.click(current[choice])
+        if self._permission_gone(key, card["fingerprint"]):
+            return choice
+        raise RuntimeError("Permission click was not accepted")
+
+    def invoke(self, node):
+        """Press a button through UI Automation, without focus change or mouse movement.
+        False when the button offers no Invoke."""
+        if self.worker._stop_event.is_set() or not self.worker.cmds.empty():
+            raise RuntimeError("Pending command; action deferred")
+        if not node.visible or not node.control.IsEnabled or node.control.IsOffscreen:
+            raise RuntimeError("Control is unavailable")
+        pattern = node.control.GetInvokePattern()
+        if pattern is None:
+            return False
+        self.clicks += 1
+        pattern.Invoke()
+        return True
+
+    def permission_waiting(self):
+        """Cheap check between scans: a native search (~30 ms) for a button named like
+        the permission card's allow buttons. Only a hit is worth reading the window."""
+        from claude_auto_continue import auto
+        import uiautomation.uiautomation as core
+        win = self.worker._get_window()
+        if win is None:
+            return False
+        uia = core._AutomationClient.instance().IUIAutomation
+        condition = uia.CreateAndCondition(
+            uia.CreatePropertyCondition(auto.PropertyId.ControlTypeProperty, auto.ControlType.ButtonControl),
+            uia.CreatePropertyConditionEx(auto.PropertyId.NameProperty, "allow", 3))   # any case, substring
+        found = win.Element.FindAll(4, condition)                                    # all descendants
+        return any(allow_name(found.GetElement(i).CurrentName or "") for i in range(found.Length))
+
+    def _same_permission(self, key, fingerprint):
+        pane = self.resolve(key, navigate=False)
+        card = permission_in(pane) if pane else None
+        return card if card and card["fingerprint"] == fingerprint else None
+
+    def _permission_gone(self, key, fingerprint):
+        for _ in range(3):
+            time.sleep(0.4)
+            if self._same_permission(key, fingerprint) is None:
+                return True
+        return False
+
     @staticmethod
     def selection_kind(node):
         """"toggle" (multiple choice), "select" (native single choice) or None
@@ -501,6 +837,8 @@ class ClaudeUI:
 
 LIMIT_WINDOW = dt.timedelta(hours=5)   # a 5-hour limit cannot outlast its window
 CLEAR_SCANS = 2                        # scans without an unknown-reset limit before it counts as gone
+PERMISSION_CHECK_S = 3                 # between scans: how often a permission card is looked for
+PERMISSION_BACKOFF_S = 30              # ...after an approval that did not go through
 
 
 @dataclass
@@ -524,14 +862,20 @@ class SessionEngine:
         self.worker = worker
         self.ui = ui or ClaudeUI(worker)
         self.quota = quota or QuotaLog()
+        self.handover = HandoverFlow(self)
         self.sessions = {}
         self.catalog = {}
         self.cursor = 0
         self.next_scan = 0
+        self.next_permission = 0
         self.last_scan_error = ""
 
+    def discover(self, root):
+        """Open panes and sidebar entries of this app (ChatGPT's engine overrides it)."""
+        return discover(root)
+
     def refresh(self):
-        panes, entries = discover(self.ui.snapshot())
+        panes, entries = self.discover(self.ui.snapshot())
         previous = self.catalog
         self.catalog = {}
         # Follow Claude's current sidebar order instead of first-discovery order.
@@ -577,17 +921,22 @@ class SessionEngine:
         nearest = min(pending, key=lambda s: s.due) if pending else None
         self.worker.reset_at = nearest.reset if nearest else None
         self.worker.send_at = nearest.due if nearest else None
+        pause = getattr(self.worker, "pause_reason", None)
         shown = (self.worker.state if self.worker.state in ("IDLE", "STARTING") else
-                 "ARMED" if nearest else "MONITORING")
+                 "PAUSED" if pause else "ARMED" if nearest else "MONITORING")
         self.worker.emit("state", dict(state=shown, reset_at=self.worker.reset_at, send_at=self.worker.send_at,
+                                       pause_reason=pause,
                                        start_until=getattr(self.worker, "start_until", None)))
 
     def reset(self):
         self.sessions.clear()
+        self.handover.clear()
         self.next_scan = 0
 
     def note(self, key, state, text, **details):
-        label = self.worker.t(text, **details)
+        """Log what happened to a conversation, once per change. `text` is a key or one of
+        the program's own error messages; both reach the log in the window's language."""
+        label = self.worker.text(text, **details)
         if state.notice != text or state.notice_label != label:
             state.notice, state.notice_label = text, label
             self.worker.log("log_chat_action", chat=key.split(":", 1)[-1], action=label)
@@ -598,6 +947,14 @@ class SessionEngine:
         except Exception:   # an unreadable log must never stop the watch
             return None
 
+    def logged_context(self, title):
+        """How much context this conversation has used, from the app's own log, when the
+        window does not say. An unreadable log must never stop the watch."""
+        try:
+            return self.quota.context_for(title)
+        except Exception:
+            return None
+
     def arm(self, reset):
         panes = self.refresh()
         for key in self.targets(panes):
@@ -605,9 +962,47 @@ class SessionEngine:
                 due=reset + dt.timedelta(seconds=self.worker.cfg["send_delay_after_reset_s"]))
         self.publish()
 
+    def check_permissions(self):
+        """Between scans, approve a waiting permission card within seconds. The cheap
+        search almost always finds nothing; only a hit reads the whole window."""
+        cfg = self.worker.cfg
+        if not (cfg.get("auto_permissions") and cfg["auto_send"]) or time.monotonic() < self.next_permission:
+            return
+        self.next_permission = time.monotonic() + PERMISSION_CHECK_S
+        try:
+            if not self.ui.permission_waiting():
+                return
+            panes, _ = self.discover(self.ui.snapshot())
+        except Exception:
+            return      # the regular scan reports a window it cannot read
+        targets = set(self.targets(panes))
+        for pane in panes:
+            card = permission_in(pane) if pane.key in targets else None
+            if not card:
+                continue
+            try:
+                with input_lock(worker_cancelled(self.worker)):
+                    self.permit(pane.key, card)
+            except Exception as exc:
+                self.next_permission = time.monotonic() + PERMISSION_BACKOFF_S
+                self.note(pane.key, self.sessions.setdefault(pane.key, SessionState()), str(exc))
+
     def tick(self, now=None):
-        from claude_auto_continue import detect_limit_banner, parse_reset_time
         now = now or dt.datetime.now()
+        # Someone else at the mouse (a person, or an agent driving the screen) means
+        # hands off everything: reading is harmless, but there is nothing to do with a
+        # reading we may not act on.
+        reason = self.worker.guard.pause_reason()
+        if reason:
+            if self.worker.pause_reason != reason:
+                self.worker.pause_reason = reason
+                self.worker.log("log_paused", "warn", why=self.worker.text("pause_" + reason))
+            self.publish()
+            return
+        if self.worker.pause_reason:
+            self.worker.pause_reason = None
+            self.worker.log("log_pause_over")
+        self.check_permissions()
         if time.monotonic() < self.next_scan:
             return
         try:
@@ -615,10 +1010,14 @@ class SessionEngine:
             self.last_scan_error = ""
         except Exception as exc:
             self.next_scan = time.monotonic() + self.worker.cfg["scan_interval_s"]
-            self.worker.emit("status", "no_window")
+            hidden = isinstance(exc, WindowHidden)
+            self.worker.emit("status", "hidden" if hidden else "no_window")
             if str(exc) != self.last_scan_error:
                 self.last_scan_error = str(exc)
-                self.worker.log("log_monitor_error", "warn", err=str(exc))
+                if hidden:
+                    self.worker.log("log_hidden", "warn")
+                else:
+                    self.worker.log("log_monitor_error", "warn", err=self.worker.text(str(exc)))
             return
         targets = self.targets(panes)
         self.sessions = {k: v for k, v in self.sessions.items() if k in targets}
@@ -630,42 +1029,73 @@ class SessionEngine:
         self.cursor += 1
         state = self.sessions.setdefault(key, SessionState())
         try:
-            pane = self.ui.resolve(key, navigate=self.worker.cfg.get("watch_scope") == "selected")
-            if pane is None:
-                self.note(key, state, "unavailable")
-                return
-            observed = signals(pane, detect_limit_banner)
-            self.worker.emit("status", "ok")
-            threshold = self.worker.cfg.get("limit_threshold_pct", 100)
-            meter = usage_meter(pane, parse_reset_time)
-            maxed = meter["pct"] is not None and meter["pct"] >= threshold
-            logged = self.logged_reset() if observed["limit"] or maxed else None
-            if observed["limit"]:
-                # The notice often omits the time; the meter (when maxed) and
-                # Claude Code's own log of the rejection still carry it.
-                observed["reset"] = choose_reset(
-                    [observed["reset"], meter["reset"] if maxed else None, logged], now)
-            # A maxed meter alone is ambiguous (it shows the fullest plan window):
-            # only the usage panel tells the 5-hour row from a weekly one.
-            need_panel = (observed["limit"] and not observed["reset"]) or (not observed["limit"] and maxed)
-            unknown = state.phase == "waiting" and state.reason == "limit" and state.reset is None
-            if need_panel and time.monotonic() >= state.next_panel and (state.phase == "watching" or unknown):
-                state.next_panel = time.monotonic() + self.worker.cfg.get("panel_backoff_s", 300)
-                rows, ok = self.worker._read_usage_panel(self.worker._get_window(), meter_scope=pane.root.control)
-                if ok:
-                    self.worker.emit("usage", {"rows": rows, "session": pane.title})
-                    h5 = rows.get("5h", {})
-                    if observed["limit"] or h5.get("pct", 0) >= threshold:
-                        observed["limit"] = True
-                        observed["reset"] = choose_reset([observed["reset"], h5.get("reset"), logged], now)
-            self.step(key, state, observed, now)
+            # Reading, clicking and typing for one conversation is one unit: the
+            # other Auto-Resume must not bring its window forward in the middle.
+            with input_lock(worker_cancelled(self.worker)):
+                self.scan_one(key, state, now)
         except Exception as exc:
             self.note(key, state, str(exc))
         finally:
             self.publish()
 
+    def scan_one(self, key, state, now):
+        """Observe one conversation and act on it (called with the input lock held)."""
+        from claude_auto_continue import detect_limit_banner, parse_reset_time
+        pane = self.ui.resolve(key, navigate=self.worker.cfg.get("watch_scope") == "selected")
+        if pane is None:
+            self.note(key, state, "unavailable")
+            return
+        observed = signals(pane, detect_limit_banner)
+        self.worker.emit("status", "ok")
+        threshold = self.worker.cfg.get("limit_threshold_pct", 100)
+        meter = usage_meter(pane, parse_reset_time)
+        maxed = meter["pct"] is not None and meter["pct"] >= threshold
+        logged = self.logged_reset() if observed["limit"] or maxed else None
+        if observed["limit"]:
+            # The notice often omits the time; the meter (when maxed) and
+            # Claude Code's own log of the rejection still carry it.
+            observed["reset"] = choose_reset(
+                [observed["reset"], meter["reset"] if maxed else None, logged], now)
+        # A maxed meter alone is ambiguous (it shows the fullest plan window):
+        # only the usage panel tells the 5-hour row from a weekly one.
+        need_panel = (observed["limit"] and not observed["reset"]) or (not observed["limit"] and maxed)
+        unknown = state.phase == "waiting" and state.reason == "limit" and state.reset is None
+        if need_panel and time.monotonic() >= state.next_panel and (state.phase == "watching" or unknown):
+            state.next_panel = time.monotonic() + self.worker.cfg.get("panel_backoff_s", 300)
+            rows, ok = self.worker._read_usage_panel(self.worker._get_window(), meter_scope=pane.root.control)
+            if ok:
+                self.worker.emit("usage", {"rows": rows, "session": pane.title})
+                h5 = rows.get("5h", {})
+                if observed["limit"] or h5.get("pct", 0) >= threshold:
+                    observed["limit"] = True
+                    observed["reset"] = choose_reset([observed["reset"], h5.get("reset"), logged], now)
+        self.step(key, state, observed, now)
+        self.after_observe(key, state, observed, now, pane)
+
+    def after_observe(self, key, state, observed, now, pane):
+        """Shared tail of a scan: hand the conversation over when its context is full.
+        A conversation the scheduler is busy with (a limit, an error, a question) is only
+        waited for; the handover never talks over it."""
+        self.handover.step(key, state, observed, now, pane, state.phase in BLOCKED_PHASES)
+
+    def permit(self, key, card):
+        """Approve a permission card when that option is on ("Send automatically" is the
+        master switch) and log what was allowed."""
+        cfg = self.worker.cfg
+        if not (cfg.get("auto_permissions") and cfg["auto_send"]):
+            return
+        choice = self.ui.approve(key, card)
+        if choice:
+            self.worker.log("log_chat_action", chat=key.split(":", 1)[-1],
+                            action=self.worker.text("permission_" + choice, title=card["title"]))
+
     def step(self, key, state, observed, now):
         cfg = self.worker.cfg
+        if observed.get("permission"):
+            # Claude waits for a permission: nothing is typed meanwhile and the
+            # schedule stays as it was.
+            self.permit(key, observed["permission"])
+            return
         if state.phase == "exhausted":
             return
         if observed["permanent"] and cfg.get("retry_api_errors"):
@@ -743,12 +1173,18 @@ class SessionEngine:
         state.attempts += 1
         state.phase = "verifying"
         state.due = now + dt.timedelta(seconds=cfg.get("verify_delay_s", 30))
+        # With the context over the threshold, the message that resumes a blocked chat is
+        # the request for a handover, not the user's text (and never the Try again button).
+        message = self.handover.resume_text(key, state, observed, now)
         try:
-            result = self.ui.resume(key, cfg.get("prefer_try_again", False), state.reason == "api")
+            result = self.ui.resume(key, cfg.get("prefer_try_again", False) and not message,
+                                    state.reason == "api", message=message)
         except Exception:
             state.phase = "waiting"
             state.due = state.not_before = now + dt.timedelta(seconds=max(30, cfg.get("api_retry_wait_s", 30)))
             raise
+        if message:
+            self.handover.resume_sent(key, now)
         if state.reason == "limit":
             # If the chat is still blocked afterwards, a stale reset must not
             # trigger another message on the very next scan.

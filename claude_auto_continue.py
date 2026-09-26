@@ -4,13 +4,15 @@ Claude Auto-Resume — auto-continue for Claude Desktop (Windows 11).
 
 Watches the Claude app window via UI Automation, detects the usage-limit
 message (5-hour / weekly), parses the reset time and, one minute after the
-reset, types "continue" into the chat box and presses Enter.
+reset, types the message to send (DEFAULT_MESSAGE unless changed) into the
+chat box and presses Enter.
 
 UI is bilingual (English / Polish), default English.
 
 Requires: Python 3.10+, package `uiautomation` (pip install uiautomation).
 """
 
+import collections
 import ctypes
 import ctypes.wintypes
 import datetime as dt
@@ -25,7 +27,11 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 sys.modules.setdefault("claude_auto_continue", sys.modules[__name__])
-from session_automation import SessionEngine
+from handover import parse_threshold
+from input_guard import InputGuard
+from input_lock import input_lock, worker_cancelled
+from strings import STRINGS, Text
+from session_automation import SessionEngine, WindowHidden
 
 try:
     import uiautomation as auto
@@ -45,11 +51,16 @@ kernel32 = ctypes.windll.kernel32
 
 # ---------------------------------------------------------------- configuration
 
+# What is typed into a conversation once its limit has reset. The agent gets told why it
+# stopped, so it picks the work up instead of asking what "continue" refers to.
+DEFAULT_MESSAGE = ("I hit my usage limit while you were working, but it has reset now. "
+                   "Please continue from where you left off if possible autonomously.")
+
 DEFAULT_CONFIG = {
     "language": "en",               # "en" or "pl"
     "scan_interval_s": 20,          # how often to scan the window (seconds)
-    "send_delay_after_reset_s": 60, # seconds after reset to send "continue"
-    "message": "continue",          # what to type into the chat
+    "send_delay_after_reset_s": 60, # seconds after reset to send the message
+    "message": DEFAULT_MESSAGE,     # what to type into the chat
     "message_box_lines": 4,         # height of the message box, in text lines
     "auto_send": True,              # False = only alert, do not send
     "keep_awake": True,             # keep Windows from sleeping
@@ -59,10 +70,20 @@ DEFAULT_CONFIG = {
     "prefer_try_again": False,
     "retry_api_errors": True,
     "auto_approach": False,
+    "auto_permissions": False,
     "api_retry_wait_s": 30,
     "verify_delay_s": 30,
     "max_retries": 6,               # retries while the limit is still active
     "retry_wait_s": 600,            # retry spacing when reset time is unknown
+    "handover_enabled": False,       # hand the work over when the context fills up
+    "handover_threshold": "700k",    # "700k", "0.7M", "700000" or "70%"
+    "plan_folder": "",               # where the next sections of the project are written
+    "handover_request_text": "",     # empty = the default text from the translations
+    "handover_continue_text": "",
+    "handover_timeout_min": 30,      # how long a handover may take before it needs help
+    "pause_on_foreign_input": True,  # hold still while someone else uses the mouse
+    "foreign_input_quiet_s": 30,     # calm needed before acting again
+    "computer_use_hold_s": 120,      # ...after an agent's last computer-use call
     "limit_threshold_pct": 100,     # 5-hour limit % that counts as "hit"
     "panel_backoff_s": 300,         # min spacing between usage-panel opens while
                                     # the plan meter is maxed out by a weekly limit
@@ -73,10 +94,13 @@ DEFAULT_CONFIG = {
 RUNTIME_ONLY = ("watch_scope", "selected_chats")
 
 
-def load_config():
-    cfg = dict(DEFAULT_CONFIG)
+def load_config(path=None, defaults=None):
+    """Settings from the file on top of the defaults. ChatGPT Auto-Resume passes its
+    own defaults, which differ where Codex differs (e.g. a smaller context window)."""
+    defaults = defaults or DEFAULT_CONFIG
+    cfg = dict(defaults)
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        with open(path or CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg.update(json.load(f))
     except (OSError, ValueError, TypeError):
         pass
@@ -86,278 +110,49 @@ def load_config():
     for field, minimum, maximum in (("scan_interval_s", 5, 300), ("api_retry_wait_s", 5, 900),
                                     ("max_retries", 1, 20), ("retry_wait_s", 30, 86400),
                                     ("verify_delay_s", 5, 300), ("send_delay_after_reset_s", 0, 3600),
-                                    ("start_delay_s", 0, 120)):
+                                    ("start_delay_s", 0, 120), ("foreign_input_quiet_s", 5, 300),
+                                    ("computer_use_hold_s", 30, 900), ("handover_timeout_min", 5, 240)):
         try:
             cfg[field] = min(maximum, max(minimum, int(cfg[field])))
         except (TypeError, ValueError):
-            cfg[field] = DEFAULT_CONFIG[field]
+            cfg[field] = defaults[field]
     return cfg
 
 
-def save_config(cfg):
+def save_config(cfg, path=None):
     data = {key: value for key, value in cfg.items() if key not in RUNTIME_ONLY}
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        with open(path or CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except OSError:
         pass
 
 # ----------------------------------------------------------------- translations
-
-STRINGS = {
-    "en": {
-        # window states
-        "state_idle": "Watch is off",
-        "state_monitoring": "Watching your session",
-        "state_armed": "Limit hit — waiting for reset",
-        "state_verify": "Sent — checking result",
-        # header captions
-        "cap_click_start": "Click “Start watching”.",
-        "cap_no_window": "Can’t see the Claude window — open the app and click “Refresh”.",
-        "cap_guarding": "Guarding session: {session}",
-        "cap_scanning": "Scanning the Claude window every {sec} s.",
-        "cap_armed_reset": "Reset {reset} — I’ll send “continue” at {send}.",
-        "cap_armed_noreset": "Reset time unknown — I’ll try at {send}.",
-        "cap_verify": "About to check whether the session resumed.",
-        # usage row
-        "usage_5h_none": "5-hour limit —",
-        "usage_5h": "5-hour limit {pct}%",
-        "usage_weekly": "weekly {pct}%",
-        "usage_fable": "Fable {pct}%",
-        "usage_5h_reset": "resets {reset}",
-        # section headers
-        "sec_control": "CONTROL",
-        "sec_log": "LOG",
-        # controls
-        "lbl_window": "Claude window:",
-        "btn_refresh": "Refresh",
-        "btn_start": "Start watching",
-        "btn_stop": "Stop",
-        "btn_send_now": "Send “continue” now",
-        "lbl_scan_every": "Scan every",
-        "lbl_seconds": "s",
-        "chk_autosend": "Send automatically",
-        "chk_awake": "Keep the PC awake",
-        "lbl_message": "Message to send:",
-        "hint_message": "drag the handle to resize — line breaks become spaces",
-        "lbl_know_reset": "Know the reset time?",
-        "btn_arm": "Arm",
-        "lbl_arm_hint": "format HH:MM — I’ll send a minute after that time",
-        "combo_handle": "{title}  (handle {hwnd})",
-        # dialogs
-        "dlg_send_title": "Confirm send",
-        "dlg_send_body": "Type “continue” and press Enter in the Claude window now?",
-        "dlg_time_title": "Invalid time",
-        "dlg_time_format": "Enter the reset time as HH:MM, e.g. 15:00.",
-        "dlg_time_range": "Time must be between 00:00 and 23:59.",
-        # log lines
-        "log_monitor_error": "Monitor ERROR: {err}",
-        "log_no_window_start": "Claude window not found — open Claude and click Refresh.",
-        "log_started": "Watching started.",
-        "log_stopped": "Watching stopped.",
-        "log_manual_send": "Manual “continue” send…",
-        "log_armed_manual": "Armed manually: reset {reset}, send at {send}.",
-        "log_autosend_off": "Send time passed, but auto-send is OFF — alert only.",
-        "log_window_refound": "Claude window found again (handle {hwnd}).",
-        "log_5h_hit": "5-HOUR LIMIT HIT ({pct}%). Resets {reset}. I’ll send at {send}.",
-        "log_banner_hit": "“USAGE LIMIT REACHED” notice detected. Resets {reset}. I’ll send at {send}.",
-        "log_5h_reset_updated": "5-hour reset updated: {reset}.",
-        "log_panel_unreadable": "Couldn’t read the usage panel — will try again.",
-        "log_send_fail_nowin": "SEND FAILED: no Claude window.",
-        "log_send_abort_fg": "SEND ABORTED: Claude window isn’t in front (won’t type into another app).",
-        "log_sent": "Sent “{message}” + Enter.",
-        "log_send_fail": "SEND FAILED: {err}",
-        "log_retries_done": "Out of retries — back to normal watching.",
-        "log_retry_at": "Retry at {send} ({n}/{max}).",
-        "log_still_done": "Limit still active, out of retries — keep watching.",
-        "log_still_new": "Limit still active — new reset {reset}, send at {send}.",
-        "log_still_retry": "Limit still active — retry at {send} ({n}/{max}).",
-        "log_success": "SUCCESS — limit cleared, session resumed. Watching on.",
-    },
-    "pl": {
-        "state_idle": "Czuwanie wyłączone",
-        "state_monitoring": "Czuwam nad sesją",
-        "state_armed": "Limit strzelony — czekam na reset",
-        "state_verify": "Wysłano — sprawdzam efekt",
-        "cap_click_start": "Kliknij „Rozpocznij czuwanie”.",
-        "cap_no_window": "Nie widzę okna Claude — uruchom aplikację i kliknij „Odśwież”.",
-        "cap_guarding": "Pilnuję sesji: {session}",
-        "cap_scanning": "Skanuję okno Claude co {sec} s.",
-        "cap_armed_reset": "Reset {reset} — wyślę „continue” o {send}.",
-        "cap_armed_noreset": "Nie znam godziny resetu — spróbuję o {send}.",
-        "cap_verify": "Za chwilę sprawdzę, czy sesja ruszyła.",
-        "usage_5h_none": "limit 5-godzinny —",
-        "usage_5h": "limit 5-godzinny {pct}%",
-        "usage_weekly": "tygodniowy {pct}%",
-        "usage_fable": "Fable {pct}%",
-        "usage_5h_reset": "reset {reset}",
-        "sec_control": "STEROWANIE",
-        "sec_log": "DZIENNIK",
-        "lbl_window": "Okno Claude:",
-        "btn_refresh": "Odśwież",
-        "btn_start": "Rozpocznij czuwanie",
-        "btn_stop": "Zatrzymaj",
-        "btn_send_now": "Wyślij „continue” teraz",
-        "lbl_scan_every": "Skanuj co",
-        "lbl_seconds": "s",
-        "chk_autosend": "Wysyłaj automatycznie",
-        "chk_awake": "Nie usypiaj komputera",
-        "lbl_message": "Wysyłany tekst:",
-        "hint_message": "przeciągnij uchwyt, by zmienić rozmiar — złamania linii zamieniam na spacje",
-        "lbl_know_reset": "Znasz godzinę resetu?",
-        "btn_arm": "Uzbrój",
-        "lbl_arm_hint": "format HH:MM — wyślę minutę po tej godzinie",
-        "combo_handle": "{title}  (uchwyt {hwnd})",
-        "dlg_send_title": "Potwierdź wysyłkę",
-        "dlg_send_body": "Wpisać „continue” i wcisnąć Enter w oknie Claude teraz?",
-        "dlg_time_title": "Nieprawidłowa godzina",
-        "dlg_time_format": "Wpisz godzinę resetu w formacie HH:MM, np. 15:00.",
-        "dlg_time_range": "Godzina musi być z zakresu 00:00–23:59.",
-        "log_monitor_error": "BŁĄD monitora: {err}",
-        "log_no_window_start": "Nie znaleziono okna Claude — uruchom Claude i kliknij Odśwież.",
-        "log_started": "Czuwanie uruchomione.",
-        "log_stopped": "Czuwanie zatrzymane.",
-        "log_manual_send": "Ręczna wysyłka „continue”…",
-        "log_armed_manual": "Uzbrojono ręcznie: reset {reset}, wysyłka {send}.",
-        "log_autosend_off": "Czas wysyłki minął, ale auto-wysyłka jest WYŁĄCZONA — tylko alarm.",
-        "log_window_refound": "Okno Claude odnalezione ponownie (uchwyt {hwnd}).",
-        "log_5h_hit": "LIMIT 5-GODZINNY STRZELONY ({pct}%). Reset {reset}. Wyślę o {send}.",
-        "log_banner_hit": "Wykryto powiadomienie „USAGE LIMIT REACHED”. Reset {reset}. Wyślę o {send}.",
-        "log_5h_reset_updated": "Zaktualizowano reset 5h: {reset}.",
-        "log_panel_unreadable": "Nie udało się odczytać panelu zużycia — spróbuję ponownie.",
-        "log_send_fail_nowin": "WYSYŁKA NIEUDANA: brak okna Claude.",
-        "log_send_abort_fg": "WYSYŁKA PRZERWANA: okno Claude nie jest na wierzchu (nie będę pisać do innej aplikacji).",
-        "log_sent": "Wysłano „{message}” + Enter.",
-        "log_send_fail": "WYSYŁKA NIEUDANA: {err}",
-        "log_retries_done": "Wyczerpano próby — wracam do zwykłego czuwania.",
-        "log_retry_at": "Ponowna próba o {send} ({n}/{max}).",
-        "log_still_done": "Limit nadal aktywny, wyczerpano próby — czuwam dalej.",
-        "log_still_new": "Limit nadal aktywny — nowy reset {reset}, wysyłka o {send}.",
-        "log_still_retry": "Limit nadal aktywny — ponowię o {send} ({n}/{max}).",
-        "log_success": "SUKCES — limit zniknął, sesja wznowiona. Czuwam dalej.",
-    },
-}
+# The tables live in strings.py, which both Auto-Resumes share.
 
 
-STRINGS["en"].update({
-    "scope_open": "All open conversation panes",
-    "scope_selected": "Only checked conversations",
-    "chats_refresh": "Read chats",
-    "chats_hint": "Check a row to watch it. Open older chats in Claude, then read the list again.",
-    "chats_empty": "Read chats to see open panes and the loaded sidebar conversations.",
-    "col_watch": "Watch", "col_chat": "Conversation", "col_source": "Source", "col_status": "Status / next attempt",
-    "prefer_try_again": "Prefer “Try again” after a limit reset",
-    "retry_api_errors": "Retry API and server errors",
-    "auto_approach": "Answer approach questions automatically",
-    "prefer_try_again_help": (
-        "When the usage limit resets, the program tries to click Claude’s “Try again” button, "
-        "which repeats the request that was cut off, instead of typing your message. If it can’t "
-        "find the button, it sends your message as usual.\n\n"
-        "Off: your message is always sent after a reset."),
-    "retry_api_errors_help": (
-        "When Claude stops because of a temporary problem on its side (an overloaded server, "
-        "“API Error”, a dropped connection), the program tries again by itself: it clicks "
-        "“Try again” or sends your message.\n\n"
-        "First retry after 30 s, each next one later (at most every 15 min), up to 6 times. "
-        "Account and access errors (e.g. signed out) are not retried — they need you. "
-        "Works only with “Send automatically” on."),
-    "auto_approach_help": (
-        "Sometimes Claude pauses and asks how to continue, offering a few answers to pick from. "
-        "The program picks the answer marked “Recommended”; in a multiple-choice question it "
-        "ticks every such answer and clicks “Next” or “Submit”. Follow-up questions are "
-        "handled one by one.\n\n"
-        "If nothing is recommended (or a single-choice question recommends more than one "
-        "answer), it types “Pick your recommended option(s).” into “Other”, so Claude chooses. "
-        "It won’t touch a question you’ve already started answering and never approves "
-        "permission requests. Works only with “Send automatically” on."),
-    "log_chat_action": "{chat}: {action}",
-    "btn_send_now": "Resume now…", "dlg_send_body": "Resume all conversations in the chosen scope now? Existing drafts and busy sessions will be skipped.",
-    "state_monitoring": "Watching conversations", "state_armed": "Waiting for the next attempt",
-    "cap_armed_noreset": "Next attempt at {send}. See each conversation’s status below.",
-    "cap_armed_reset": "Reset {reset} — next attempt at {send}.",
-    "watching": "Watching", "waiting": "Waiting", "verifying": "Checking", "exhausted": "Needs attention",
-    "sidebar": "Sidebar", "open": "Open pane", "unavailable": "Unavailable — open it in Claude",
-    "waiting_limit_at": "Usage limit — resets {reset}, next attempt {send}",
-    "waiting_limit_unknown": "Usage limit — reset time unknown, waiting for it to clear (at the latest {send})",
-    "waiting_api": "Server error — retry scheduled",
-    "approach_submitted": "Recommended approach submitted", "resumed": "Block cleared",
-    "permanent_error": "Account / access error — manual action required", "retry_limit": "Retry limit reached — stop/start to rearm",
-    "alert_only": "Alert only — automatic sending is off", "retry": "Clicked Try again", "message": "Sent configured message",
-    "cleared": "Error cleared", "busy": "Claude is already working",
-    "inactive": "Not watching", "not_visible": "Not currently loaded",
-    "question": "Awaiting an answer",
-    "state_starting": "Autonomous control in {sec} s",
-    "cap_starting": "Then Auto-Resume starts switching conversations and typing in Claude. Click “Stop” to cancel.",
-    "log_starting": "Autonomous control starts in {sec} s — click Stop to cancel.",
-    "starting": "Starting soon",
-    "lbl_start_delay": "Countdown before taking control",
-    "btn_default_order": "Default order",
-})
-STRINGS["pl"].update({
-    "scope_open": "Wszystkie otwarte panele rozmów",
-    "scope_selected": "Tylko zaznaczone rozmowy",
-    "chats_refresh": "Odczytaj czaty",
-    "chats_hint": "Zaznacz rozmowy do pilnowania. Starszy czat otwórz w Claude i odczytaj listę ponownie.",
-    "chats_empty": "Odczytaj czaty, aby zobaczyć otwarte panele i rozmowy z paska bocznego.",
-    "col_watch": "Pilnuj", "col_chat": "Rozmowa", "col_source": "Źródło", "col_status": "Stan / następna próba",
-    "prefer_try_again": "Preferuj „Try again” po resecie limitu",
-    "retry_api_errors": "Ponawiaj błędy API i serwera",
-    "auto_approach": "Automatycznie odpowiadaj na pytania o podejście",
-    "prefer_try_again_help": (
-        "Gdy limit użycia się zresetuje, program spróbuje kliknąć w Claude przycisk „Try again”, "
-        "który ponawia przerwaną prośbę, zamiast wpisywać Twoją wiadomość. Jeśli go nie znajdzie, "
-        "wyśle wiadomość jak zwykle.\n\n"
-        "Wyłączone: po resecie zawsze idzie Twoja wiadomość."),
-    "retry_api_errors_help": (
-        "Gdy Claude przerwie pracę przez chwilowy błąd po swojej stronie (np. przeciążony serwer, "
-        "„API Error”, zerwane połączenie), program sam spróbuje ponownie: kliknie „Try again” "
-        "albo wyśle Twoją wiadomość.\n\n"
-        "Pierwsza próba po 30 s, każda kolejna później (maks. co 15 min), najwyżej 6 razy. "
-        "Błędów konta i dostępu (np. wylogowanie) nie ponawia — wtedy potrzebna jest Twoja reakcja. "
-        "Działa tylko z włączonym „Wysyłaj automatycznie”."),
-    "auto_approach_help": (
-        "Czasem Claude zatrzymuje się i pyta, jak dalej działać, pokazując kilka odpowiedzi do wyboru. "
-        "Program wybiera wtedy odpowiedź oznaczoną jako „Recommended” (rekomendowana), a w pytaniu "
-        "wielokrotnego wyboru zaznacza wszystkie takie odpowiedzi i klika „Next” albo „Submit”. "
-        "Kolejne pytania obsługuje po kolei.\n\n"
-        "Jeśli nic nie jest polecane (albo pytanie jednokrotnego wyboru poleca kilka odpowiedzi), "
-        "wpisze w polu „Other”: „Pick your recommended option(s).”, żeby Claude sam wybrał. "
-        "Nie rusza pytań z już rozpoczętą odpowiedzią i nigdy nie zatwierdza próśb o uprawnienia. "
-        "Działa tylko z włączonym „Wysyłaj automatycznie”."),
-    "log_chat_action": "{chat}: {action}",
-    "btn_send_now": "Wznów teraz…", "dlg_send_body": "Wznowić teraz wszystkie rozmowy z wybranego zakresu? Szkice i pracujące sesje zostaną pominięte.",
-    "state_monitoring": "Czuwam nad rozmowami", "state_armed": "Czekam na następną próbę",
-    "cap_armed_noreset": "Następna próba o {send}. Stan poszczególnych rozmów znajdziesz na liście.",
-    "cap_armed_reset": "Reset {reset} — następna próba o {send}.",
-    "watching": "Czuwanie", "waiting": "Oczekiwanie", "verifying": "Sprawdzanie", "exhausted": "Wymaga uwagi",
-    "sidebar": "Pasek boczny", "open": "Otwarty panel", "unavailable": "Niedostępna — otwórz w Claude",
-    "waiting_limit_at": "Limit użycia — reset {reset}, wysyłka o {send}",
-    "waiting_limit_unknown": "Limit użycia — nieznana godzina resetu, czekam aż zniknie (najpóźniej {send})",
-    "waiting_api": "Błąd serwera — zaplanowano próbę",
-    "approach_submitted": "Wysłano rekomendowane podejście", "resumed": "Blokada ustąpiła",
-    "permanent_error": "Błąd konta / dostępu — potrzebne działanie użytkownika", "retry_limit": "Wyczerpano próby — zatrzymaj i uruchom czuwanie ponownie",
-    "alert_only": "Tylko alarm — automatyczna wysyłka wyłączona", "retry": "Kliknięto Try again", "message": "Wysłano ustawioną wiadomość",
-    "cleared": "Błąd ustąpił", "busy": "Claude już pracuje",
-    "inactive": "Czuwanie wyłączone", "not_visible": "Obecnie niewczytana",
-    "question": "Czeka na odpowiedź",
-    "state_starting": "Autonomiczna kontrola za {sec} s",
-    "cap_starting": "Potem Auto-Resume zacznie przełączać rozmowy i pisać w Claude. Kliknij „Zatrzymaj”, aby anulować.",
-    "log_starting": "Autonomiczna kontrola ruszy za {sec} s — kliknij „Zatrzymaj”, aby anulować.",
-    "starting": "Za chwilę start",
-    "lbl_start_delay": "Odliczanie przed przejęciem kontroli",
-    "btn_default_order": "Domyślna kolejność",
-})
-
-
-def tr(lang, key, **kw):
-    """Translate a key; fall back to English, then to the raw key."""
-    template = STRINGS.get(lang, STRINGS["en"]).get(key)
+def tr(lang, key, table=None, **kw):
+    """Translate a key; fall back to English, then to the raw key. `table` is a
+    product's own string table (ChatGPT Auto-Resume); Claude's by default. Values that
+    are Texts (translated parts, e.g. a chat's status in a log line) are translated
+    again into `lang`, so a whole line changes language, not just its frame."""
+    table = table or STRINGS
+    template = table.get(lang, table["en"]).get(key)
     if template is None:
-        template = STRINGS["en"].get(key, key)
+        template = table["en"].get(key, key)
+    kw = {name: _retranslate(lang, value, table) for name, value in kw.items()}
     try:
         return template.format(**kw)
     except (KeyError, IndexError, ValueError):
         return template
+
+
+def _retranslate(lang, value, table):
+    if not isinstance(value, Text):
+        return value
+    if value.key is None:                    # Text.joined: a list of texts
+        return value.kw["sep"].join(str(_retranslate(lang, part, table)) for part in value.kw["parts"])
+    return tr(lang, value.key, table, **value.kw)
 
 # ------------------------------------------------------------------- detection
 
@@ -529,6 +324,8 @@ def detect_limit_banner(texts, now=None):
 
 # -------------------------------------------------------------- Windows layer
 
+MANUAL_IGNORE_S = 120        # after a command the user clicked, don't wait for calm
+
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
@@ -546,6 +343,15 @@ def allow_sleep():
     kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
 
+WS_EX_TRANSPARENT = 0x20
+
+
+def click_through(hwnd):
+    """True for a window the mouse passes through: an overlay an app draws over the screen,
+    e.g. Claude's while it drives the computer. Never a window to read or click."""
+    return bool(user32.GetWindowLongW(hwnd, -20) & WS_EX_TRANSPARENT)      # GWL_EXSTYLE
+
+
 def process_exe_name(pid):
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -560,6 +366,50 @@ def process_exe_name(pid):
     finally:
         kernel32.CloseHandle(h)
 
+# ---------------------------------------------------- one copy per watched window
+# Two copies watching the same window would both type into the same conversation. A copy
+# claims the window it watches with a named mutex. Copies watching different windows (a
+# second Claude window, or Claude's and ChatGPT's) run side by side and take turns at the
+# keyboard through input_lock.py.
+
+ERROR_ALREADY_EXISTS = 183
+_mutexes = ctypes.WinDLL("kernel32", use_last_error=True)
+_mutexes.CreateMutexW.restype = ctypes.wintypes.HANDLE
+_mutexes.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
+_mutexes.OpenMutexW.restype = ctypes.wintypes.HANDLE
+_mutexes.OpenMutexW.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
+_mutexes.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+
+
+def _claim_name(hwnd):
+    return "Local\\AutoResume.Watching.%d" % hwnd
+
+
+def claim_window(hwnd):
+    """The claim on a window (a handle to close when done); None when another copy has it.
+    Should Windows refuse the mutex altogether, the copy watches unguarded (True)."""
+    ctypes.set_last_error(0)
+    handle = _mutexes.CreateMutexW(None, False, _claim_name(hwnd))
+    if not handle:
+        return True
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        _mutexes.CloseHandle(handle)
+        return None
+    return handle
+
+
+def release_claim(claim):
+    if claim and claim is not True:
+        _mutexes.CloseHandle(claim)
+
+
+def claimed(hwnd):
+    """Does some copy (this one included) watch the window?"""
+    handle = _mutexes.OpenMutexW(0x00100000, False, _claim_name(hwnd))     # SYNCHRONIZE
+    if handle:
+        _mutexes.CloseHandle(handle)
+    return bool(handle)
+
 # --------------------------------------------------------------- monitor thread
 
 
@@ -567,6 +417,8 @@ class MonitorWorker(threading.Thread):
     """All UI Automation calls happen in this thread (its own COM apartment)."""
 
     IDLE, STARTING, MONITORING, ARMED, VERIFY = "IDLE", "STARTING", "MONITORING", "ARMED", "VERIFY"
+    strings = STRINGS               # this product's UI and log texts
+    engine_class = SessionEngine    # this product's accessibility adapter + scheduler
 
     def __init__(self, out_queue, cfg):
         super().__init__(daemon=True)
@@ -580,8 +432,12 @@ class MonitorWorker(threading.Thread):
         self.start_deadline = None    # monotonic end of the start countdown
         self.start_until = None       # the same moment as a datetime, for the UI
         self.pending_arm = None       # manual reset time applied when the countdown ends
+        self.guard = InputGuard(self)  # is anyone else using the mouse right now?
+        self.pause_reason = None      # None, "user", "claude_cu" or "chatgpt_cu"
+        self.claim = None             # this copy's claim on the window it watches
+        self.claimed_hwnd = None
         self._stop_event = threading.Event()
-        self.engine = SessionEngine(self)
+        self.engine = self.engine_class(self)
 
     # --- API for the UI thread (thread-safe) ---
     def command(self, name, payload=None):
@@ -595,14 +451,24 @@ class MonitorWorker(threading.Thread):
         self.out.put((kind, data))
 
     def t(self, key, **kw):
-        return tr(self.cfg.get("language", "en"), key, **kw)
+        return tr(self.cfg.get("language", "en"), key, table=self.strings, **kw)
+
+    def text(self, key, **kw):
+        """t() that remembers its key: put into a log line, it changes language with it."""
+        return Text(self.t(key, **kw), key, kw)
+
+    def log_path(self):
+        return LOG_PATH
 
     def log(self, key, level="info", **kw):
-        msg = self.t(key, **kw)
-        line = f"[{dt.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
+        """Write a line to the log file (in the current language) and to the window, which
+        keeps its key and shows it again in the other language after a switch."""
+        stamp = f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}"
+        msg = self.text(key, **kw)
+        line = Text(self.t("log_line", stamp=stamp, msg=msg), "log_line", dict(stamp=stamp, msg=msg))
         self.emit("log", (line, level))
         try:
-            with open(LOG_PATH, "a", encoding="utf-8") as f:
+            with open(self.log_path(), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except OSError:
             pass
@@ -619,6 +485,37 @@ class MonitorWorker(threading.Thread):
                     self.log("log_monitor_error", "bad", err=repr(e))
                     time.sleep(2)
                 time.sleep(0.5)
+        self.release_window()
+        allow_sleep()
+
+    # ------------------------------------------------ the window this copy watches
+    def _pick_window(self, wins):
+        """The first window no other copy watches; with none free, the first one (shown,
+        but starting to watch it is refused)."""
+        free = [hwnd for hwnd, _ in wins if hwnd == self.claimed_hwnd or not claimed(hwnd)]
+        return free[0] if free else (wins[0][0] if wins else None)
+
+    def _claim_window(self):
+        """Claim the watched window for this copy; False when another copy watches it."""
+        if self.claim and self.claimed_hwnd == self.hwnd:
+            return True
+        self.release_window()
+        claim = claim_window(self.hwnd)
+        if not claim:
+            return False
+        self.claim, self.claimed_hwnd = claim, self.hwnd
+        return True
+
+    def release_window(self):
+        release_claim(self.claim)
+        self.claim = self.claimed_hwnd = None
+
+    def _stop_watching(self):
+        self.state = self.IDLE
+        self.start_deadline = self.start_until = self.pending_arm = None
+        self.engine.reset()
+        self.reset_at = self.send_at = None
+        self.release_window()
         allow_sleep()
 
     def _process_commands(self):
@@ -630,56 +527,58 @@ class MonitorWorker(threading.Thread):
             if name == "refresh_windows":
                 wins = self._enum_windows()
                 if self.hwnd not in {hwnd for hwnd, _ in wins}:
-                    self.hwnd = wins[0][0] if wins else None
+                    self.hwnd = self._pick_window(wins)
                     self.engine.reset()
                     self.engine.catalog.clear()
                 self.emit("windows", wins)
                 if wins:
-                    try:
-                        self.engine.refresh()
-                    except Exception as exc:
-                        self.log("log_monitor_error", "warn", err=str(exc))
+                    self._refresh()
                 else:
                     self.emit("chats", [])
                     self.emit("status", "no_window")
             elif name == "refresh_chats":
-                try:
-                    self.engine.refresh()
-                except Exception as exc:
-                    self.log("log_monitor_error", "warn", err=str(exc))
+                self._refresh()
             elif name == "select_window":
                 if self.hwnd != payload:
                     self.engine.reset()
                     self.engine.catalog.clear()
                     self.hwnd = payload
-                    self.engine.refresh()
+                    if self.state != self.IDLE and not self._claim_window():
+                        self._stop_watching()     # never watch a window another copy watches
+                        self.log("log_window_taken", "warn")
+                        self.emit("state", self._state_info())
+                    self._refresh()
             elif name == "start":
                 self._begin()
             elif name == "stop":
-                self.state = self.IDLE
-                self.start_deadline = self.start_until = self.pending_arm = None
-                self.engine.reset()
-                self.reset_at = self.send_at = None
-                allow_sleep()
+                self._stop_watching()
                 self.log("log_stopped")
                 self.emit("state", self._state_info())
                 self.engine.publish()     # don't leave cancelled timers in the list
             elif name == "send_now":
+                if self.hwnd and self.claimed_hwnd != self.hwnd and claimed(self.hwnd):
+                    self.log("log_window_taken", "warn")    # the copy watching it resumes it
+                    continue
                 self.log("log_manual_send")
-                panes = self.engine.refresh()
-                for key in self.engine.targets(panes):
+                # The user just clicked our own window: don't wait for the mouse to
+                # go quiet (the computer-use signals still apply).
+                self.guard.ignore_user_for(MANUAL_IGNORE_S)
+                panes = self._refresh()
+                for key in self.engine.targets(panes or []):
                     if not self.cmds.empty() or self._stop_event.is_set():
                         break
                     try:
-                        result = self.engine.ui.resume(key, self.cfg.get("prefer_try_again"))
+                        with input_lock(worker_cancelled(self)):
+                            result = self.engine.ui.resume(key, self.cfg.get("prefer_try_again"))
                         from session_automation import SessionState
                         self.engine.sessions[key] = SessionState(
                             phase="watching" if result in ("busy", "cleared") else "verifying",
                             reason="limit", due=dt.datetime.now() + dt.timedelta(seconds=self.cfg["verify_delay_s"]))
-                        self.log("log_chat_action", chat=key.split(":", 1)[-1], action=self.t(result))
+                        self.log("log_chat_action", chat=key.split(":", 1)[-1], action=self.text(result))
                     except Exception as exc:
-                        self.log("log_chat_action", "warn", chat=key.split(":", 1)[-1], action=str(exc))
+                        self.log("log_chat_action", "warn", chat=key.split(":", 1)[-1], action=self.text(str(exc)))
             elif name == "arm_manual":
+                self.guard.ignore_user_for(MANUAL_IGNORE_S)
                 if self.state == self.IDLE:
                     self._begin(arm=payload)
                 elif self.state == self.STARTING:
@@ -690,16 +589,30 @@ class MonitorWorker(threading.Thread):
                 self.cfg.update(payload)
                 self.engine.next_scan = 0
 
+    def _refresh(self):
+        """Re-read the window's conversations; None when it can't be read now."""
+        try:
+            return self.engine.refresh()
+        except WindowHidden:
+            self.emit("status", "hidden")
+            self.log("log_hidden", "warn")
+        except Exception as exc:
+            self.log("log_monitor_error", "warn", err=self.text(str(exc)))
+        return None
+
     def _begin(self, arm=None):
         """Start watching after a visible countdown, so the user can let go of
         the mouse and keyboard before the app starts switching chats."""
         if not self.hwnd:
             wins = self._enum_windows()
             if wins:
-                self.hwnd = wins[0][0]
+                self.hwnd = self._pick_window(wins)
                 self.emit("windows", wins)
         if not self.hwnd:
             self.log("log_no_window_start", "warn")
+            return
+        if not self._claim_window():
+            self.log("log_window_taken", "warn")
             return
         self.engine.reset()
         self.pending_arm = arm
@@ -746,7 +659,7 @@ class MonitorWorker(threading.Thread):
                 return None
             wins = self._enum_windows()
             if wins:
-                self.hwnd = wins[0][0]
+                self.hwnd = self._pick_window(wins)
                 self.emit("windows", wins)
                 self.log("log_window_refound", hwnd=self.hwnd)
             else:
@@ -762,7 +675,7 @@ class MonitorWorker(threading.Thread):
         try:
             for w in auto.GetRootControl().GetChildren():
                 try:
-                    if w.ClassName != "Chrome_WidgetWin_1":
+                    if w.ClassName != "Chrome_WidgetWin_1" or click_through(w.NativeWindowHandle):
                         continue
                     name = w.Name or ""
                     exe = process_exe_name(w.ProcessId)
@@ -896,6 +809,8 @@ class MonitorWorker(threading.Thread):
         btn = self._find_usage_button(meter_scope if meter_scope is not None else win)
         if not btn:
             return {}, False
+        if self.guard.user_busy():
+            return {}, False      # someone else has the mouse; the panel can wait
         self._focus_window(self.hwnd)
         if user32.GetForegroundWindow() != self.hwnd or not self.cmds.empty() or self._stop_event.is_set():
             return {}, False
@@ -905,7 +820,8 @@ class MonitorWorker(threading.Thread):
         try:
             if btn.IsOffscreen or not btn.IsEnabled:
                 return {}, False
-            btn.Click(simulateMove=False)
+            with self.guard.sending():
+                btn.Click(simulateMove=False)
         except Exception:
             return {}, False
         time.sleep(1.0)
@@ -920,12 +836,14 @@ class MonitorWorker(threading.Thread):
             ok = False
         try:
             if user32.GetForegroundWindow() == self.hwnd:
-                auto.SendKeys("{Esc}", waitTime=0.05)
+                with self.guard.sending():
+                    auto.SendKeys("{Esc}", waitTime=0.05)
         except Exception:
             pass
         time.sleep(0.35)
         try:
-            user32.SetCursorPos(m0[0], m0[1])
+            with self.guard.sending():
+                user32.SetCursorPos(m0[0], m0[1])
         except Exception:
             pass
         return rows, ok
@@ -994,13 +912,15 @@ THEME = {
     "blue":      "#7FA8D9",   # verifying
     "red":       "#D98080",
     "track":     "#2A2E38",
+    "hover":     "#2E3543",   # a control under the pointer
+    "press":     "#38404F",   # ...and while it is held down
 }
 
 # state -> lamp color key + label string key
 STATE_COLOR = {"IDLE": "muted", "STARTING": "amber", "MONITORING": "green",
-               "ARMED": "amber", "VERIFY": "blue"}
+               "ARMED": "amber", "VERIFY": "blue", "PAUSED": "amber"}
 STATE_LABEL = {"IDLE": "state_idle", "STARTING": "state_starting", "MONITORING": "state_monitoring",
-               "ARMED": "state_armed", "VERIFY": "state_verify"}
+               "ARMED": "state_armed", "VERIFY": "state_verify", "PAUSED": "state_paused"}
 
 
 def pick_fonts(root):
@@ -1025,17 +945,25 @@ def enable_dark_titlebar(root):
 
 
 class App(tk.Tk):
+    # What differs per watched app; ChatGPT Auto-Resume subclasses this window.
+    TITLE = "Claude Auto-Resume"
+    WORDMARK = "CLAUDE AUTO-RESUME"
+    WORKER = MonitorWorker
+    FEATURES = ("prefer_try_again", "retry_api_errors", "auto_approach", "auto_permissions",
+                "pause_on_foreign_input", "handover_enabled")
+    LOG_KEEP = 2000              # log lines the window keeps (and shows again after a language switch)
+
     def __init__(self):
         super().__init__()
-        self.title("Claude Auto-Resume")
+        self.title(self.TITLE)
         self.geometry("860x960")
         self.minsize(800, 660)
         self.configure(bg=THEME["bg"])
 
-        self.cfg = load_config()
+        self.cfg = self._load_config()
         self.lang = self.cfg.get("language", "en")
         self.out_queue = queue.Queue()
-        self.worker = MonitorWorker(self.out_queue, self.cfg)
+        self.worker = self.WORKER(self.out_queue, self.cfg)
         self.windows = []            # [(hwnd, title)]
         self.chat_rows = []          # worker order: Claude's newest-first sidebar order
         self.view_rows = []          # rows as displayed (sorted); tree iids index into this
@@ -1044,8 +972,10 @@ class App(tk.Tk):
         self.help_tip = None         # tooltip window for the "?" next to an option
         self.help_label = None
         self.help_key = None
+        self.help_icons = {}         # key -> its "?" icon, which the tooltip is placed beside
         self._help_timer = None
         self.checked_chats = set(self.cfg.get("selected_chats", []))
+        self.log_lines = collections.deque(maxlen=self.LOG_KEEP)   # (Text line, level)
         self.state_info = {"state": "IDLE", "reset_at": None, "send_at": None}
         self.usage = {}              # used / plan / reset / session
         self.armed_since = None
@@ -1073,6 +1003,12 @@ class App(tk.Tk):
                         bordercolor=t["border"], focuscolor=t["amber"],
                         lightcolor=t["border"], darkcolor=t["border"],
                         troughcolor=t["bg"], font=(self.font_ui, 10))
+        # clam paints anything hovered or held that has no rule of its own light grey
+        # (#eeebe7): a hovered heading of the conversation list went white and its text
+        # disappeared. Hover and press stay dark here, one step lighter each.
+        style.map(".", background=[("disabled", t["panel"]), ("pressed", t["press"]),
+                                   ("active", t["hover"])],
+                  foreground=[("disabled", t["muted"])])
         style.configure("TFrame", background=t["bg"])
         style.configure("Panel.TFrame", background=t["panel"])
         style.configure("TLabel", background=t["bg"], foreground=t["text"])
@@ -1082,12 +1018,13 @@ class App(tk.Tk):
         style.configure("TButton", background=t["panel_hi"], foreground=t["text"],
                         borderwidth=1, padding=(14, 7))
         style.map("TButton",
-                  background=[("disabled", t["panel"]), ("active", "#2E3543")],
-                  foreground=[("disabled", t["muted"])])
+                  background=[("disabled", t["panel"]), ("pressed", t["press"]), ("active", t["hover"])],
+                  foreground=[("disabled", t["muted"])],
+                  lightcolor=[("pressed", t["press"])], darkcolor=[("pressed", t["press"])])
         style.configure("Primary.TButton", background="#2E4433",
                         foreground="#D6EBD8")
         style.map("Primary.TButton",
-                  background=[("disabled", t["panel"]), ("active", "#38523E")],
+                  background=[("disabled", t["panel"]), ("pressed", "#2A3D2F"), ("active", "#38523E")],
                   foreground=[("disabled", t["muted"])])
         style.configure("Panel.TCheckbutton", background=t["panel"],
                         foreground=t["text"], indicatorbackground=t["panel_hi"],
@@ -1100,26 +1037,36 @@ class App(tk.Tk):
                         background=t["panel_hi"], foreground=t["text"],
                         arrowcolor=t["text"], selectbackground=t["panel_hi"],
                         selectforeground=t["text"])
-        style.map("TCombobox", fieldbackground=[("readonly", t["panel_hi"])])
+        style.map("TCombobox", fieldbackground=[("readonly", t["panel_hi"])],
+                  background=[("pressed", t["press"]), ("active", t["hover"])])
         style.configure("TEntry", fieldbackground=t["panel_hi"],
                         foreground=t["text"], insertcolor=t["text"])
+        style.map("TEntry", background=[("readonly", t["panel"])],
+                  lightcolor=[("focus", t["amber"])], darkcolor=[("focus", t["amber"])])
         style.configure("TSpinbox", fieldbackground=t["panel_hi"],
                         background=t["panel_hi"], foreground=t["text"],
                         arrowcolor=t["text"], insertcolor=t["text"])
+        style.map("TSpinbox", background=[("readonly", t["panel_hi"]), ("pressed", t["press"]),
+                                          ("active", t["hover"])])
         style.configure("Treeview", background=t["log_bg"], fieldbackground=t["log_bg"],
                         foreground=t["text"], rowheight=28, borderwidth=0)
         style.map("Treeview", background=[("selected", t["panel_hi"])],
                   foreground=[("selected", t["text"])])
         style.configure("Treeview.Heading", background=t["panel_hi"], foreground=t["text"], padding=6)
+        # The headings sort the list: under the pointer they light up in the accent colour.
+        style.map("Treeview.Heading", background=[("pressed", t["press"]), ("active", t["hover"])],
+                  foreground=[("pressed", t["text"]), ("active", t["amber"])])
         style.configure("TNotebook", background=t["panel"], borderwidth=0)
         style.configure("TNotebook.Tab", background=t["panel_hi"], foreground=t["text"], padding=(14, 8))
-        style.map("TNotebook.Tab", background=[("selected", t["panel"])], foreground=[("selected", t["amber"])])
+        style.map("TNotebook.Tab", background=[("selected", t["panel"]), ("active", t["hover"])],
+                  foreground=[("selected", t["amber"])],
+                  lightcolor=[("selected", t["panel"]), ("!selected", t["border"])])
         style.configure("Vertical.TScrollbar", background=t["panel_hi"],
                         troughcolor=t["log_bg"], arrowcolor=t["muted"],
                         bordercolor=t["border"], lightcolor=t["panel_hi"],
                         darkcolor=t["panel_hi"], gripcount=0)
         style.map("Vertical.TScrollbar",
-                  background=[("active", "#2E3543"), ("pressed", "#38404F")],
+                  background=[("pressed", t["press"]), ("active", t["hover"])],
                   arrowcolor=[("active", t["text"])])
         self.option_add("*TCombobox*Listbox.background", t["panel_hi"])
         self.option_add("*TCombobox*Listbox.foreground", t["text"])
@@ -1144,7 +1091,7 @@ class App(tk.Tk):
         # --- top bar: wordmark + EN/PL toggle ---
         top = tk.Frame(root, bg=t["bg"])
         top.pack(fill="x", pady=(0, 8))
-        tk.Label(top, text="CLAUDE AUTO-RESUME", bg=t["bg"], fg=t["muted"],
+        tk.Label(top, text=self.WORDMARK, bg=t["bg"], fg=t["muted"],
                  font=(self.font_ui, 9, "bold")).pack(side="left")
         seg = tk.Frame(top, bg=t["border"])
         seg.pack(side="right")
@@ -1248,11 +1195,14 @@ class App(tk.Tk):
         self.settings_tab = tk.Frame(self.notebook, bg=t["panel"], padx=2, pady=10)
         self.notebook.add(self.chats_tab, text="Conversations")
         self.notebook.add(self.settings_tab, text="Settings")
+        # What is watched follows from the list itself: nothing checked means the
+        # conversations open in Claude, otherwise exactly the checked ones. This line says
+        # which of the two is in force.
         scope_row = tk.Frame(self.chats_tab, bg=t["panel"])
         scope_row.pack(fill="x", pady=(0, 8))
-        self.cmb_scope = ttk.Combobox(scope_row, state="readonly", width=40)
-        self.cmb_scope.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.cmb_scope.bind("<<ComboboxSelected>>", lambda _e: self._push_config())
+        self.lbl_watching = tk.Label(scope_row, anchor="w", bg=t["panel"], fg=t["text"],
+                                     font=(self.font_ui, 10, "bold"))
+        self.lbl_watching.pack(side="left", fill="x", expand=True, padx=(2, 8))
         self.btn_chats_refresh = ttk.Button(scope_row, command=lambda: self.worker.command("refresh_chats"))
         self.btn_chats_refresh.pack(side="right")
         self.btn_default_order = ttk.Button(scope_row, command=self._default_order, state="disabled")
@@ -1277,7 +1227,7 @@ class App(tk.Tk):
         self.feature_vars = {}
         self.feature_checks = {}
         self.feature_help = {}
-        for key in ("prefer_try_again", "retry_api_errors", "auto_approach"):
+        for key in self.FEATURES:
             var = tk.BooleanVar(value=self.cfg.get(key, False))
             row = tk.Frame(self.chats_tab, bg=t["panel"])
             row.pack(anchor="w", pady=2)
@@ -1325,8 +1275,64 @@ class App(tk.Tk):
                                              font=(self.font_ui, 10))
         self.lbl_start_delay_unit.pack(side="left")
 
+        row_quiet = tk.Frame(panel_in, bg=t["panel"])
+        row_quiet.pack(fill="x", pady=(0, 8))
+        self.lbl_quiet = tk.Label(row_quiet, text="", bg=t["panel"], fg=t["text"],
+                                  font=(self.font_ui, 10))
+        self.lbl_quiet.pack(side="left")
+        self.var_quiet = tk.IntVar(value=self.cfg["foreign_input_quiet_s"])
+        ttk.Spinbox(row_quiet, from_=5, to=300, width=4, textvariable=self.var_quiet,
+                    command=self._push_config).pack(side="left", padx=4)
+        self.lbl_quiet_unit = tk.Label(row_quiet, text="", bg=t["panel"], fg=t["text"],
+                                       font=(self.font_ui, 10))
+        self.lbl_quiet_unit.pack(side="left")
+
+        # The handover's own settings, in a group of their own that is shown only while
+        # "Hand the work over to a new conversation" is on (see _show_handover_rows).
+        self.handover_rows = tk.Frame(panel_in, bg=t["panel"], highlightthickness=1,
+                                      highlightbackground=t["border"], padx=10, pady=8)
+        self.lbl_sec_handover = tk.Label(self.handover_rows, text="", anchor="w", bg=t["panel"],
+                                         fg=t["muted"], font=(self.font_ui, 8, "bold"))
+        self.lbl_sec_handover.pack(fill="x", pady=(0, 6))
+
+        row_hand = tk.Frame(self.handover_rows, bg=t["panel"])
+        row_hand.pack(fill="x", pady=(0, 8))
+        self.lbl_threshold = tk.Label(row_hand, text="", bg=t["panel"], fg=t["text"],
+                                      font=(self.font_ui, 10))
+        self.lbl_threshold.pack(side="left")
+        self.var_threshold = tk.StringVar(value=self.cfg["handover_threshold"])
+        ent_threshold = ttk.Entry(row_hand, width=8, textvariable=self.var_threshold)
+        ent_threshold.pack(side="left", padx=4)
+        ent_threshold.bind("<FocusOut>", lambda _e: self._push_config())
+        ent_threshold.bind("<Return>", lambda _e: self._push_config())
+        self.lbl_threshold_hint = tk.Label(row_hand, text="", bg=t["panel"], fg=t["muted"],
+                                           font=(self.font_ui, 9))
+        self.lbl_threshold_hint.pack(side="left", padx=(6, 6))
+        self._help_icon(row_hand, "handover_threshold").pack(side="left")
+
+        row_plan = tk.Frame(self.handover_rows, bg=t["panel"])
+        row_plan.pack(fill="x", pady=(0, 8))
+        self.lbl_plan_folder = tk.Label(row_plan, text="", bg=t["panel"], fg=t["text"],
+                                        font=(self.font_ui, 10))
+        self.lbl_plan_folder.pack(side="left")
+        self._help_icon(row_plan, "plan_folder").pack(side="left", padx=(6, 0))
+        self.btn_plan_pick = ttk.Button(row_plan, text="", command=self._pick_plan_folder)
+        self.btn_plan_pick.pack(side="right")
+        self.var_plan = tk.StringVar(value=self.cfg["plan_folder"])
+        ent_plan = ttk.Entry(row_plan, textvariable=self.var_plan)
+        ent_plan.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        ent_plan.bind("<FocusOut>", lambda _e: self._push_config())
+        ent_plan.bind("<Return>", lambda _e: self._push_config())
+
+        row_texts = tk.Frame(self.handover_rows, bg=t["panel"])
+        row_texts.pack(fill="x")
+        self.btn_handover_texts = ttk.Button(row_texts, text="", command=self._edit_handover_texts)
+        self.btn_handover_texts.pack(side="left")
+        self._help_icon(row_texts, "handover_texts").pack(side="left", padx=(8, 0))
+
         row_msg = tk.Frame(panel_in, bg=t["panel"])
         row_msg.pack(fill="x", pady=(0, 8))
+        self.row_msg = row_msg
         row_msg_head = tk.Frame(row_msg, bg=t["panel"])
         row_msg_head.pack(fill="x")
         self.lbl_message = tk.Label(row_msg_head, text="", bg=t["panel"],
@@ -1349,7 +1355,7 @@ class App(tk.Tk):
         self.txt_message.pack(side="left", fill="both", expand=True,
                               padx=(1, 0), pady=1)
         msg_scroll.pack(side="right", fill="y", pady=1, padx=(0, 1))
-        self.txt_message.insert("1.0", self.cfg.get("message", "continue"))
+        self.txt_message.insert("1.0", self.cfg.get("message") or DEFAULT_MESSAGE)
         self.txt_message.bind("<FocusOut>", lambda _e: self._commit_message())
 
         self.grip_msg = tk.Canvas(row_msg, height=9, bg=t["panel"],
@@ -1396,17 +1402,34 @@ class App(tk.Tk):
         self.txt_log.tag_configure("bad", foreground=t["red"])
 
         self.progress.bind("<Configure>", lambda _e: self._draw_progress())
+        self._show_handover_rows()
+
+    def _show_handover_rows(self):
+        """The threshold, the plan folder and the messages mean something only while the
+        handover is on, so they are shown only then (in their old place in Settings)."""
+        if self.feature_vars["handover_enabled"].get():
+            if not self.handover_rows.winfo_manager():
+                self.handover_rows.pack(fill="x", pady=(0, 10), before=self.row_msg)
+        else:
+            self.handover_rows.pack_forget()
+
+    # ---------------------------------------------------------------- settings
+    def _load_config(self):
+        return load_config()
+
+    def _save_config(self):
+        save_config(self.cfg)
 
     # ------------------------------------------------------------------ i18n
     def _T(self, key, **kw):
-        return tr(self.lang, key, **kw)
+        return tr(self.lang, key, table=self.WORKER.strings, **kw)
 
     def _set_lang(self, code):
         if code == self.lang or code not in ("en", "pl"):
             return
         self.lang = code
         self.cfg["language"] = code
-        save_config(self.cfg)
+        self._save_config()
         self.worker.command("config", {"language": code})
         self._update_lang_buttons()
         self._retext()
@@ -1430,6 +1453,14 @@ class App(tk.Tk):
         self.lbl_seconds.config(text=self._T("lbl_seconds"))
         self.lbl_start_delay.config(text=self._T("lbl_start_delay"))
         self.lbl_start_delay_unit.config(text=self._T("lbl_seconds"))
+        self.lbl_quiet.config(text=self._T("lbl_quiet"))
+        self.lbl_quiet_unit.config(text=self._T("lbl_seconds"))
+        self.lbl_threshold.config(text=self._T("lbl_threshold"))
+        self.lbl_threshold_hint.config(text=self._T("hint_threshold"), fg=THEME["muted"])
+        self.btn_handover_texts.config(text=self._T("btn_handover_texts"))
+        self.lbl_sec_handover.config(text=self._T("sec_handover"))
+        self.lbl_plan_folder.config(text=self._T("lbl_plan"))
+        self.btn_plan_pick.config(text=self._T("btn_plan_pick"))
         self.chk_autosend.config(text=self._T("chk_autosend"))
         self.chk_awake.config(text=self._T("chk_awake"))
         self.lbl_message.config(text=self._T("lbl_message"))
@@ -1439,15 +1470,20 @@ class App(tk.Tk):
         self.lbl_arm_hint.config(text=self._T("lbl_arm_hint"))
         self.notebook.tab(self.chats_tab, text="Rozmowy" if self.lang == "pl" else "Conversations")
         self.notebook.tab(self.settings_tab, text="Ustawienia" if self.lang == "pl" else "Settings")
-        self.cmb_scope["values"] = [self._T("scope_open"), self._T("scope_selected")]
-        self.cmb_scope.current(1 if self.cfg.get("watch_scope") == "selected" else 0)
         self.btn_chats_refresh.config(text=self._T("chats_refresh"))
         for key, check in self.feature_checks.items():
             check.config(text=self._T(key))
         if self.help_key:
             self._show_help(self.help_key)
         self.btn_default_order.config(text=self._T("btn_default_order"))
+        # The source column as wide as its longest label in this language: ChatGPT's
+        # "Open conversation" does not fit the width Claude's "Open pane" needs.
+        import tkinter.font as tkfont
+        font = tkfont.Font(font=(self.font_ui, 10))
+        width = max(font.measure(self._T(key)) for key in ("open", "sidebar", "col_source")) + 24
+        self.tree_chats.column("source", width=max(110, width))
         self._render_chats()
+        self._render_log()
         self._rebuild_window_combo()
         self._render_state()
         self._render_usage()
@@ -1499,6 +1535,7 @@ class App(tk.Tk):
         for sequence in ("<Return>", "<space>"):
             icon.bind(sequence, lambda _e: self._toggle_help(key))
         icon.bind("<Escape>", lambda _e: self._hide_help())
+        self.help_icons[key] = icon
         return icon
 
     def _cancel_help_timer(self):
@@ -1523,7 +1560,7 @@ class App(tk.Tk):
         self.help_label.config(text=self._T(key + "_help"))
         self.help_key = key
         # Beside the icon, kept inside the app window (which may be on any monitor).
-        icon = self.feature_help[key]
+        icon = self.help_icons[key]
         self.help_tip.update_idletasks()
         width, height = self.help_tip.winfo_reqwidth(), self.help_tip.winfo_reqheight()
         right = self.winfo_rootx() + self.winfo_width()
@@ -1559,14 +1596,19 @@ class App(tk.Tk):
         if not row or int(row) >= len(self.view_rows):
             return
         key = self.view_rows[int(row)]["key"]
-        if key in self.checked_chats:
-            self.checked_chats.remove(key)
-        else:
-            self.checked_chats.add(key)
-        self.cmb_scope.current(1)
+        if not self.checked_chats:
+            # The first click turns what the list shows as watched (the open conversations)
+            # into checks, so only the clicked row changes.
+            self.checked_chats = {r["key"] for r in self.chat_rows if self._watched_by_default(r)}
+        self.checked_chats ^= {key}
         self._push_config()
         self._render_chats()
         return "break"
+
+    @staticmethod
+    def _watched_by_default(row):
+        """With nothing checked, the conversations open in the app are the ones watched."""
+        return row.get("source") == "open" and row.get("available", False)
 
     def _sort_by(self, column):
         if self.sort_column == column:
@@ -1588,8 +1630,8 @@ class App(tk.Tk):
         elif not row.get("available", True):
             status = self._T("not_visible")
         due = row.get("due") if row.get("phase") in ("waiting", "verifying") else None
-        checked = (row["key"] in self.checked_chats if self.cmb_scope.current() == 1 else
-                   row.get("source") == "open" and row.get("available", False))
+        checked = (row["key"] in self.checked_chats if self.checked_chats else
+                   self._watched_by_default(row))
         cells = (("Tak" if checked else "Nie") if self.lang == "pl" else ("Yes" if checked else "No"),
                  row["title"], self._T(row.get("source", "sidebar")),
                  status + (f" · {due:%H:%M:%S}" if due else ""))
@@ -1621,7 +1663,11 @@ class App(tk.Tk):
             arrow = (" ▼" if self.sort_descending else " ▲") if col == self.sort_column else ""
             self.tree_chats.heading(col, text=self._T("col_" + col) + arrow)
         self.btn_default_order.config(state="normal" if self.sort_column else "disabled")
-        self.lbl_chats_hint.config(text=self._T("chats_hint" if self.chat_rows else "chats_empty"))
+        picked = bool(self.checked_chats)
+        self.lbl_watching.config(text=self._T("watch_picked", n=len(self.checked_chats)) if picked
+                                 else self._T("watch_open"))
+        self.lbl_chats_hint.config(text=self._T("chats_empty") if not self.chat_rows else
+                                   self._T("chats_hint_picked" if picked else "chats_hint_open"))
 
     def _on_window_selected(self, _event):
         idx = self.cmb_windows.current()
@@ -1693,20 +1739,79 @@ class App(tk.Tk):
     def _on_grip_release(self):
         self._grip_origin = None
         self.cfg["message_box_lines"] = int(self.txt_message.cget("height"))
-        save_config(self.cfg)
+        self._save_config()
 
     def _message_text(self):
         """Box content as a single line. Enter sends in Claude's composer, so a
         line break inside the message would submit it half-written."""
-        return " ".join(self.txt_message.get("1.0", "end-1c").split()) or "continue"
+        return " ".join(self.txt_message.get("1.0", "end-1c").split()) or DEFAULT_MESSAGE
 
     def _commit_message(self):
-        """Save the custom message; fall back to 'continue' when left blank."""
+        """Save the custom message; fall back to the default one when left blank."""
         msg = self._message_text()
         if msg != self.txt_message.get("1.0", "end-1c"):
             self.txt_message.delete("1.0", "end")
             self.txt_message.insert("1.0", msg)
         self._push_config()
+
+    def _pick_plan_folder(self):
+        """Point at the folder where the next sections of the project are written."""
+        from tkinter import filedialog
+        folder = filedialog.askdirectory(parent=self, initialdir=self.var_plan.get() or None,
+                                         title=self._T("lbl_plan"))
+        if folder:
+            self.var_plan.set(os.path.normpath(folder))
+            self._push_config()
+
+    def _edit_handover_texts(self):
+        """Edit both handover messages. The technical part (the file name, the marker and
+        the paths) is added by the program, so it cannot be edited away."""
+        t = THEME
+        top = tk.Toplevel(self)
+        top.title(self._T("dlg_handover_title"))
+        top.configure(bg=t["panel"])
+        top.transient(self)
+        tk.Label(top, text=self._T("dlg_handover_intro"), bg=t["panel"], fg=t["muted"], anchor="w",
+                 justify="left", wraplength=700, font=(self.font_ui, 9)).pack(fill="x", padx=12, pady=(12, 0))
+        boxes = {}
+        for key, label in (("handover_request_text", "dlg_handover_request"),
+                           ("handover_continue_text", "dlg_handover_continue")):
+            tk.Label(top, text=self._T(label), bg=t["panel"], fg=t["text"], anchor="w",
+                     font=(self.font_ui, 10)).pack(fill="x", padx=12, pady=(12, 2))
+            box = tk.Text(top, height=7, width=90, wrap="word", font=(self.font_ui, 10),
+                          bg=t["log_bg"], fg=t["text"], insertbackground=t["text"],
+                          relief="flat", padx=8, pady=6)
+            box.pack(fill="both", expand=True, padx=12)
+            box.insert("1.0", self.cfg.get(key) or self._T(key.replace("_text", "_default"),
+                                                           context="…"))
+            boxes[key] = box
+        row = tk.Frame(top, bg=t["panel"])
+        row.pack(fill="x", padx=12, pady=10)
+
+        def defaults():
+            for key, box in boxes.items():
+                box.delete("1.0", "end")
+                box.insert("1.0", self._T(key.replace("_text", "_default"), context="…"))
+
+        def save():
+            for key, box in boxes.items():
+                text = " ".join(box.get("1.0", "end-1c").split())
+                default = " ".join(self._T(key.replace("_text", "_default"), context="…").split())
+                self.cfg[key] = "" if text == default else text
+            self._push_config()
+            top.destroy()
+
+        ttk.Button(row, text=self._T("btn_defaults"), command=defaults).pack(side="left")
+        ttk.Button(row, text=self._T("btn_save"), command=save).pack(side="right")
+        top.bind("<Escape>", lambda _e: top.destroy())
+        # Over this window (not in a corner of the screen), with the keyboard in the first
+        # message, so typing and Escape work at once.
+        top.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - top.winfo_reqwidth()) // 2)
+        top.geometry(f"+{max(0, x)}+{max(0, self.winfo_rooty() + 60)}")
+        enable_dark_titlebar(top)
+        boxes["handover_request_text"].focus_set()     # the dialog's keyboard focus...
+        boxes["handover_request_text"].focus_force()   # ...and the dialog in front with it
 
     def _push_config(self):
         try:
@@ -1717,20 +1822,38 @@ class App(tk.Tk):
             start_delay = min(120, max(0, int(self.var_start_delay.get())))
         except (tk.TclError, ValueError):
             start_delay = DEFAULT_CONFIG["start_delay_s"]
+        try:
+            quiet = min(300, max(5, int(self.var_quiet.get())))
+        except (tk.TclError, ValueError):
+            quiet = DEFAULT_CONFIG["foreign_input_quiet_s"]
+        # A threshold we cannot read is not saved: the previous one stays in force and the
+        # hint beside the field says what the field takes.
+        threshold = self.var_threshold.get().strip()
+        if parse_threshold(threshold):
+            self.lbl_threshold_hint.config(text=self._T("hint_threshold"), fg=THEME["muted"])
+        else:
+            threshold = self.cfg["handover_threshold"]
+            self.lbl_threshold_hint.config(text=self._T("hint_threshold"), fg=THEME["red"])
         message = self._message_text()
         payload = {
             "scan_interval_s": interval,
             "start_delay_s": start_delay,
+            "foreign_input_quiet_s": quiet,
+            "handover_threshold": threshold,
+            "plan_folder": self.var_plan.get().strip(),
+            "handover_request_text": self.cfg.get("handover_request_text", ""),
+            "handover_continue_text": self.cfg.get("handover_continue_text", ""),
             "auto_send": bool(self.var_autosend.get()),
             "keep_awake": bool(self.var_awake.get()),
             "message": message,
-            "watch_scope": "selected" if self.cmb_scope.current() == 1 else "open",
+            "watch_scope": "selected" if self.checked_chats else "open",
             "selected_chats": sorted(self.checked_chats),
             **{key: bool(var.get()) for key, var in self.feature_vars.items()},
         }
         self.cfg.update(payload)
-        save_config(self.cfg)
+        self._save_config()
         self.worker.command("config", payload)
+        self._show_handover_rows()
         self._render_chats()
 
     # ------------------------------------------------------------- worker queue
@@ -1746,11 +1869,17 @@ class App(tk.Tk):
     def _handle_event(self, kind, data):
         if kind == "chats":
             self._render_chats(data)
+        elif kind == "selection":            # a handover replaced a checked conversation
+            self.checked_chats = set(data)
+            self.cfg["selected_chats"] = sorted(self.checked_chats)
+            self._render_chats()
         elif kind == "log":
-            line, level = data
-            tag = (level,) if level in ("warn", "good", "bad") else ()
+            full = len(self.log_lines) == self.log_lines.maxlen
+            self.log_lines.append(data)
             self.txt_log.configure(state="normal")
-            self.txt_log.insert("end", line + "\n", tag)
+            if full:                               # the oldest line leaves the window too
+                self.txt_log.delete("1.0", "2.0")
+            self._insert_log_line(*data)
             self.txt_log.see("end")
             self.txt_log.configure(state="disabled")
         elif kind == "windows":
@@ -1782,6 +1911,25 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+    # --------------------------------------------------------------------- log
+    def _insert_log_line(self, line, level):
+        text = self._T(line.key, **line.kw) if isinstance(line, Text) and line.key else str(line)
+        self.txt_log.insert("end", text + "\n", (level,) if level in ("warn", "good", "bad") else ())
+
+    def _render_log(self):
+        """Every kept line again, in the window's current language."""
+        at_end = self.txt_log.yview()[1] >= 0.999
+        top = self.txt_log.yview()[0]
+        self.txt_log.configure(state="normal")
+        self.txt_log.delete("1.0", "end")
+        for line, level in self.log_lines:
+            self._insert_log_line(line, level)
+        self.txt_log.configure(state="disabled")
+        if at_end:
+            self.txt_log.see("end")
+        else:
+            self.txt_log.yview_moveto(top)
+
     # ------------------------------------------------------------------ drawing
     def _rebuild_window_combo(self):
         vals = [self._T("combo_handle", title=title, hwnd=hwnd)
@@ -1791,17 +1939,19 @@ class App(tk.Tk):
         if 0 <= keep < len(vals):
             self.cmb_windows.current(keep)
 
+    @staticmethod
+    def _usage_bar(canvas, fill_id, pct):
+        """Fill a small meter by the percentage USED (red when used up)."""
+        width = canvas.winfo_width() or 90
+        frac = max(0, min(100, pct)) / 100
+        color = (THEME["red"] if pct >= 100
+                 else THEME["amber"] if pct >= 80 else THEME["green"])
+        canvas.coords(fill_id, 0, 0, int(width * frac), 5)
+        canvas.itemconfigure(fill_id, fill=color)
+
     def _render_usage(self):
         rows = self.usage.get("rows", {})
-
-        def bar(canvas, fill_id, pct):
-            width = canvas.winfo_width() or 90
-            frac = max(0, min(100, pct)) / 100
-            color = (THEME["red"] if pct >= 100
-                     else THEME["amber"] if pct >= 80 else THEME["green"])
-            canvas.coords(fill_id, 0, 0, int(width * frac), 5)
-            canvas.itemconfigure(fill_id, fill=color)
-
+        bar = self._usage_bar
         h5 = rows.get("5h", {})
         wk = rows.get("weekly", {})
         fb = rows.get("weekly_fable", {})
@@ -1836,7 +1986,8 @@ class App(tk.Tk):
         running = st != "IDLE"
         self.btn_start.config(state="disabled" if running else "normal")
         self.btn_stop.config(state="normal" if running else "disabled")
-        self.lbl_state.config(text=self._T(STATE_LABEL[st], sec=self._start_seconds_left()))
+        why = self._T("pause_" + (self.state_info.get("pause_reason") or "user"))
+        self.lbl_state.config(text=self._T(STATE_LABEL[st], sec=self._start_seconds_left(), why=why))
         self.lamp.itemconfigure(self.lamp_id, fill=THEME[STATE_COLOR[st]])
 
     def _update_caption(self):
@@ -1850,6 +2001,8 @@ class App(tk.Tk):
         elif st == "MONITORING":
             if self.last_status == "no_window":
                 self.lbl_caption.config(text=self._T("cap_no_window"))
+            elif self.last_status == "hidden":
+                self.lbl_caption.config(text=self._T("cap_hidden"))
             elif self.usage.get("session"):
                 self.lbl_caption.config(
                     text=self._T("cap_guarding",
@@ -1870,6 +2023,8 @@ class App(tk.Tk):
                     self.lbl_caption.config(
                         text=self._T("cap_armed_noreset",
                                      send=f"{send_at:%H:%M:%S}"))
+        elif st == "PAUSED":
+            self.lbl_caption.config(text=self._T("cap_paused"))
         elif st == "VERIFY":
             self.lbl_caption.config(text=self._T("cap_verify"))
 
@@ -1923,13 +2078,27 @@ class App(tk.Tk):
         self.destroy()
 
 
-def main():
+def window_geometry(argv):
+    """`--geometry WxH+X+Y` (size optional): where the launcher asked to open the
+    window, e.g. side by side with the other Auto-Resume. None when absent."""
+    for i, arg in enumerate(argv):
+        value = arg.split("=", 1)[1] if arg.startswith("--geometry=") else (
+            argv[i + 1] if arg == "--geometry" and i + 1 < len(argv) else None)
+        if value and re.fullmatch(r"(?:\d+x\d+)?[+-]\d+[+-]\d+", value):
+            return value
+    return None
+
+
+def main(app_class=None, argv=None):
     # crisp DPI on Windows 11
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         pass
-    app = App()
+    app = (app_class or App)()
+    geometry = window_geometry(sys.argv[1:] if argv is None else argv)
+    if geometry:
+        app.geometry(geometry)
     app.mainloop()
 
 

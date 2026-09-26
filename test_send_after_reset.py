@@ -11,6 +11,12 @@ import unittest
 import claude_auto_continue as app
 from session_automation import SessionEngine, SessionState
 from test_sessions import FixtureUI, observed
+from test_support import calm_desk
+
+
+def setUpModule():
+    unittest.addModuleCleanup(calm_desk())
+
 
 
 class ResetSendTests(unittest.TestCase):
@@ -30,7 +36,7 @@ class ResetSendTests(unittest.TestCase):
     def test_failed_send_cannot_be_reported_as_success(self):
         worker = app.MonitorWorker(queue.Queue(), dict(app.DEFAULT_CONFIG))
         ui = FixtureUI()
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise RuntimeError("Window unavailable")
         ui.resume = fail
         engine = SessionEngine(worker, ui)

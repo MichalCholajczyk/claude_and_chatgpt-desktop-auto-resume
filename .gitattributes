@@ -1,0 +1,5 @@
+# Pictures are stored byte for byte, whatever line-ending setting a copy of the repo has.
+*.png binary
+*.ico binary
+# cmd.exe reads batch files with Windows line endings, also in a downloaded ZIP.
+*.bat text eol=crlf
