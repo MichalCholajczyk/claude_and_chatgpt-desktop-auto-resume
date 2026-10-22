@@ -264,6 +264,16 @@ class SessionTests(unittest.TestCase):
         message(p, 1, ("Session limit reached", "ButtonControl"), ("Show message actions", "ButtonControl"))
         self.assertTrue(signals(p, app.detect_limit_banner)["limit"])
 
+    def test_in_the_older_transcript_only_the_messages_are_entries(self):
+        # Older builds list the messages right in "Chat messages", beside anything else the
+        # feed holds: a text after the last message must not hide its card (review, 15.10).
+        p = pane()
+        message(p, 1, ("You said: implement the spec", "TextControl"))
+        message(p, 2, *LIMIT_CARD)
+        feed = next(n for n in p.root.walk() if n.name == "Chat messages")
+        node("Use the up and down arrow keys to move between messages.", "TextControl", node(parent=feed))
+        self.assertEqual(final_limit_card(p, app.parse_reset_time), (True, None))
+
     def test_limit_card_before_newer_messages_is_history(self):
         p = pane()
         message(p, 1, *LIMIT_CARD)
@@ -676,6 +686,92 @@ class LimitSafetyTests(unittest.TestCase):
         self.assertEqual((state.phase, state.reason), ("waiting", "limit"))
         self.assertEqual(state.due, dt.datetime(2026, 9, 15, 9, 31))
         self.assertEqual(self.ui.calls, [])
+
+
+class NothingToResumeTests(unittest.TestCase):
+    """20.10: the resume message went out every ten minutes, six times each, into two
+    conversations nothing blocked. One had only finished its turn and waited for an answer
+    when the account's 5-hour meter filled up; later a status text read as a limit took its
+    reset from a rejection logged eleven days before, long past."""
+    TITLE = "Nowy czat podagenta w obserwowanych"
+    RESET = NOW + dt.timedelta(hours=3, minutes=30)
+
+    def setUp(self):
+        self.worker = app.MonitorWorker(queue.Queue(), dict(app.DEFAULT_CONFIG))
+        self.worker.log = lambda *a, **kw: None
+        self.ui = FixtureUI()
+        self.ui.snapshot = lambda: self.pane.root
+        self.ui.resolve = lambda key, navigate=True: discover(self.pane.root)[0][0]
+        # Unit tests must never reach the real Claude window.
+        self.worker._get_window = Mock(return_value=None)
+        self.worker._read_usage_panel = Mock(return_value=({"5h": dict(pct=100, reset=self.RESET)}, True))
+        self.engine = SessionEngine(self.worker, self.ui, quota=FakeQuota())
+
+    def scan(self, now, working=False, meter=100, card=False, strip=False):
+        """One scan of the conversation as the window shows it then: Stop while it works,
+        the account's meter, its own limit card, the strip beside the chat box."""
+        self.pane = p = pane(self.TITLE)
+        message(p, 1, ("You said: zrób to", "TextControl"))
+        if card:
+            message(p, 2, *LIMIT_CARD)
+        if meter is not None:
+            node("Usage: %d%% of session limit" % meter, "ButtonControl", p.root)
+        if working:
+            node("Stop", "ButtonControl", p.root)
+        if strip:
+            node("Usage limit reached", "TextControl", p.root)
+        self.engine.next_scan = 0
+        self.engine.tick(now=now)
+        return self.engine.sessions["code:" + self.TITLE]
+
+    def test_a_full_meter_does_not_stop_a_conversation_waiting_for_you(self):
+        state = self.scan(NOW)
+        self.scan(self.RESET + dt.timedelta(minutes=2))
+        self.assertEqual(state.phase, "watching")
+        self.assertEqual(self.ui.calls, [])
+
+    def test_nor_does_the_strip_beside_the_chat_box(self):
+        state = self.scan(NOW, meter=None, strip=True)
+        self.scan(NOW + dt.timedelta(hours=6), meter=None, strip=True)
+        self.assertEqual(state.phase, "watching")
+        self.assertEqual(self.ui.calls, [])
+
+    def test_a_full_meter_still_stops_a_conversation_that_was_working(self):
+        self.scan(NOW, working=True, meter=90)
+        state = self.scan(NOW + dt.timedelta(minutes=1))           # stopped as the meter filled
+        self.assertEqual((state.phase, state.reason, state.reset), ("waiting", "limit", self.RESET))
+        self.scan(self.RESET + dt.timedelta(minutes=2))
+        self.assertEqual(len(self.ui.calls), 1)
+
+    def test_a_stopped_conversation_waits_while_the_strip_stays(self):
+        # With no reset known, nothing goes out while the limit is still on screen.
+        self.worker._read_usage_panel = Mock(return_value=({}, False))
+        self.scan(NOW, working=True, meter=None)
+        for minutes in (1, 2, 3, 4):
+            state = self.scan(NOW + dt.timedelta(minutes=minutes), meter=None, strip=True)
+        self.assertEqual((state.phase, state.reason, state.reset), ("waiting", "limit", None))
+        self.assertEqual(self.ui.calls, [])
+
+    def test_its_own_limit_card_counts_although_it_never_seemed_to_work(self):
+        state = self.scan(NOW, meter=None, card=True)
+        self.assertEqual((state.phase, state.reason), ("waiting", "limit"))
+
+    def test_a_rejection_logged_days_ago_gives_no_reset(self):
+        # Once the conversation that hit the limit has written on, an older rejection is
+        # the newest left in the logs' tails.
+        self.engine.quota = FakeQuota(NOW - dt.timedelta(days=11))
+        self.worker._read_usage_panel = Mock(return_value=({}, False))
+        state = self.scan(NOW, meter=None, card=True)
+        self.scan(NOW + dt.timedelta(minutes=30), meter=None, card=True)
+        self.assertEqual((state.phase, state.reset), ("waiting", None))
+        self.assertEqual(self.ui.calls, [])
+
+    def test_a_rejection_whose_reset_passed_a_while_ago_still_counts(self):
+        # The limit already reset: the conversation is resumed at once.
+        self.engine.quota = FakeQuota(NOW - dt.timedelta(minutes=30))
+        self.worker._read_usage_panel = Mock(return_value=({}, False))
+        self.scan(NOW, meter=None, card=True)
+        self.assertEqual(len(self.ui.calls), 1)
 
 
 class WorkerStartTests(unittest.TestCase):

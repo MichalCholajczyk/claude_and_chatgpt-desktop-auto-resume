@@ -857,6 +857,13 @@ class AppTests(unittest.TestCase):
         self.assertNotEqual(gpt.LOG_PATH, gpt.app.LOG_PATH)
         self.assertEqual(self.ui.lbl_window.cget("text"), "Okno ChatGPT:")
 
+    def test_no_wrap_up_message_box(self):
+        # Codex has no wrap-up allowance: only Claude Auto-Resume asks for that text.
+        self.assertIsNone(self.ui.txt_wrapup)
+        self.ui._set_lang("pl")
+        self.ui._commit_message()
+        self.assertNotIn("wrapup_message", self.ui.help_icons)
+
     def test_usage_shows_what_is_left(self):
         self.ui._set_lang("en")
         reset = dt.datetime(2026, 9, 21, 23, 5)

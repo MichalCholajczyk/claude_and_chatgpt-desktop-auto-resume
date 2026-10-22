@@ -42,6 +42,7 @@ except ImportError:
         "Claude Auto-Resume", 0x10)
     sys.exit(1)
 
+VERSION = "v.0.42069"        # shown in the window's top-left corner, beside the wordmark
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "auto_continue_config.json")
 LOG_PATH = os.path.join(APP_DIR, "auto_continue.log")
@@ -55,12 +56,18 @@ kernel32 = ctypes.windll.kernel32
 # stopped, so it picks the work up instead of asking what "continue" refers to.
 DEFAULT_MESSAGE = ("I hit my usage limit while you were working, but it has reset now. "
                    "Please continue from where you left off if possible autonomously.")
+# What a conversation gets that wrapped up by itself at the limit: it stopped at a safe
+# point and listed what was left, so it is pointed at that list.
+DEFAULT_WRAPUP_MESSAGE = ("You stopped at a safe point because my usage limit was reached, and "
+                          "listed what was done and what was left. The limit has reset now — "
+                          "please carry on with what was left, autonomously if possible.")
 
 DEFAULT_CONFIG = {
     "language": "en",               # "en" or "pl"
     "scan_interval_s": 20,          # how often to scan the window (seconds)
     "send_delay_after_reset_s": 60, # seconds after reset to send the message
     "message": DEFAULT_MESSAGE,     # what to type into the chat
+    "wrapup_message": DEFAULT_WRAPUP_MESSAGE,   # ...into one that wrapped up at the limit
     "message_box_lines": 4,         # height of the message box, in text lines
     "auto_send": True,              # False = only alert, do not send
     "keep_awake": True,             # keep Windows from sleeping
@@ -71,6 +78,9 @@ DEFAULT_CONFIG = {
     "retry_api_errors": True,
     "auto_approach": False,
     "auto_permissions": False,
+    "auto_next_step": False,         # press the main button of the box a turn ends with
+    "auto_sessions": False,          # answer the cards about a new session...
+    "session_choice": "start",       # ...with "start" (Start / New session) or "here" (Do it here)
     "api_retry_wait_s": 30,
     "verify_delay_s": 30,
     "max_retries": 6,               # retries while the limit is still active
@@ -93,6 +103,10 @@ DEFAULT_CONFIG = {
 # Which conversations to watch is decided anew on every run: never loaded, never saved.
 RUNTIME_ONLY = ("watch_scope", "selected_chats")
 
+# The window opens as tall as its page, leaving this much of the screen's work area free
+# for the title bar and the system's offset of a new window.
+WINDOW_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_RESERVE = 860, 660, 100
+
 
 def load_config(path=None, defaults=None):
     """Settings from the file on top of the defaults. ChatGPT Auto-Resume passes its
@@ -106,6 +120,8 @@ def load_config(path=None, defaults=None):
         pass
     if cfg.get("language") not in ("en", "pl"):
         cfg["language"] = "en"
+    if cfg.get("session_choice") not in ("start", "here"):
+        cfg["session_choice"] = "start"
     cfg["watch_scope"], cfg["selected_chats"] = "open", []
     for field, minimum, maximum in (("scan_interval_s", 5, 300), ("api_retry_wait_s", 5, 900),
                                     ("max_retries", 1, 20), ("retry_wait_s", 30, 86400),
@@ -162,8 +178,14 @@ def _retranslate(lang, value, table):
 # is only rendered while the block is active — treat it as authoritative.
 # Patterns are deliberately narrow so meter/panel labels ("5-hour limit",
 # "Resets in 1 hr") can never match.
+# Since Claude Code 2.1.277 a response that hits the limit may run on to a safe point
+# (the "wrap-up allowance"): the notice reads "Usage limit reached · wrapping up"
+# meanwhile, then "Wrapped up past your usage limit" next to the reset (seen 14.10).
+USAGE_LIMIT_REACHED = r"usage\s+limit\s+reached"
+WRAPPED_UP = r"wrapped\s+up\s+past\s+your\s+(?:usage|session)\s+limit"
 BANNER_LIMIT_PATTERNS = [
-    r"usage\s+limit\s+reached",
+    USAGE_LIMIT_REACHED,
+    WRAPPED_UP,
     r"(?:session|weekly)\s+limit\s+reached",
     r"reached\s+your\s+(?:usage|session|weekly)\s+limit",
     r"hit\s+your\s+(?:usage|session|weekly)\s+limit",
@@ -172,6 +194,9 @@ BANNER_LIMIT_PATTERNS = [
     r"limit\s+u[żz]ycia\s+(?:zosta[łl]\s+)?osi[ąa]gni[ęe]ty",
     r"limit\s+(?:zosta[łl]\s+)?osi[ąa]gni[ęe]ty",
 ]
+# A forecast names a limit that has not been reached: "On pace to hit your weekly limit
+# early" stays in a status bar beside the conversation while nothing is blocked (20.10).
+LIMIT_FORECAST = r"\bon\s+pace\s+to\b"
 
 WEEKDAY_WORD = (r"(?:mon|tue|wed|thu|fri|sat|sun|pon|wt|śr|sr|czw|pi[ąa]t|pt|sob|ndz|nie)"
                 r"[a-ząćęłńóśźż]*\.?")
@@ -316,11 +341,36 @@ def detect_limit_banner(texts, now=None):
     match. Returns (matched_text, reset_datetime_or_None); (None, None) when
     no banner is visible."""
     for i, tx in enumerate(texts):
+        if re.search(LIMIT_FORECAST, tx, re.IGNORECASE):
+            continue
         for pat in BANNER_LIMIT_PATTERNS:
             if re.search(pat, tx, re.IGNORECASE):
                 window = "  ".join(texts[i:i + 4])
                 return tx.strip(), parse_reset_time(window, now=now)
     return None, None
+
+
+WRAPPING_UP = r"[\s·•\-–—]*wrapping\s+up\b"
+SEPARATORS = " ·•-–—"
+
+
+def detect_wrap_up(texts):
+    """True when the limit notice is the wrap-up one: "Wrapped up past your usage limit",
+    or "Usage limit reached" followed by "wrapping up" in the same text or the next one
+    (a lone "·" in between is skipped). Only the notice's own words count, so a
+    conversation titled "Wrapping up the release" never does."""
+    for i, tx in enumerate(texts):
+        if re.search(WRAPPED_UP, tx, re.IGNORECASE):
+            return True
+        reached = re.search(USAGE_LIMIT_REACHED, tx, re.IGNORECASE)
+        if not reached:
+            continue
+        if re.match(WRAPPING_UP, tx[reached.end():], re.IGNORECASE):
+            return True
+        after = [t for t in texts[i + 1:i + 3] if t.strip(SEPARATORS)]
+        if after and re.fullmatch(WRAPPING_UP + r"[\s.…]*", after[0], re.IGNORECASE):
+            return True
+    return False
 
 # -------------------------------------------------------------- Windows layer
 
@@ -350,6 +400,24 @@ def click_through(hwnd):
     """True for a window the mouse passes through: an overlay an app draws over the screen,
     e.g. Claude's while it drives the computer. Never a window to read or click."""
     return bool(user32.GetWindowLongW(hwnd, -20) & WS_EX_TRANSPARENT)      # GWL_EXSTYLE
+
+
+WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+
+
+def render_widgets(hwnd):
+    """The child windows that hold the app's web pages ("Chrome_RenderWidgetHostHWND")."""
+    found = []
+
+    @WNDENUMPROC
+    def visit(child, _lparam):
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(child, name, 64)
+        if name.value == "Chrome_RenderWidgetHostHWND":
+            found.append(child)
+        return True
+    user32.EnumChildWindows(hwnd, visit, 0)
+    return found
 
 
 def process_exe_name(pid):
@@ -567,13 +635,23 @@ class MonitorWorker(threading.Thread):
                 for key in self.engine.targets(panes or []):
                     if not self.cmds.empty() or self._stop_event.is_set():
                         break
+                    # A chat that wrapped up at the limit gets its own text here too, and
+                    # its strip is settled like after a scheduled resume.
+                    previous = self.engine.sessions.get(key)
+                    wrapped = bool(previous and previous.wrap_up)
                     try:
                         with input_lock(worker_cancelled(self)):
-                            result = self.engine.ui.resume(key, self.cfg.get("prefer_try_again"))
+                            result = self.engine.ui.resume(key, self.cfg.get("prefer_try_again"), False,
+                                                           message=self.engine.wrapup_text() if wrapped else None)
                         from session_automation import SessionState
-                        self.engine.sessions[key] = SessionState(
+                        now = dt.datetime.now()
+                        state = SessionState(
                             phase="watching" if result in ("busy", "cleared") else "verifying",
-                            reason="limit", due=dt.datetime.now() + dt.timedelta(seconds=self.cfg["verify_delay_s"]))
+                            reason="limit", due=now + dt.timedelta(seconds=self.cfg["verify_delay_s"]),
+                            wrap_done=previous.wrap_done if previous else None)
+                        if wrapped and result == "message":
+                            state.wrap_done, result = previous.reset or now, "wrapup_message"
+                        self.engine.sessions[key] = state
                         self.log("log_chat_action", chat=key.split(":", 1)[-1], action=self.text(result))
                     except Exception as exc:
                         self.log("log_chat_action", "warn", chat=key.split(":", 1)[-1], action=self.text(str(exc)))
@@ -689,7 +767,17 @@ class MonitorWorker(threading.Thread):
 
     @staticmethod
     def _wake_accessibility(win):
-        """Chromium builds the accessibility tree only when a client asks for it."""
+        """Chromium builds the accessibility tree only when a client asks for it. Since
+        Claude 2.37 (15.10) the window's own tree shows no page at all until the render
+        widget itself is asked, so that is asked first."""
+        try:
+            for hwnd in render_widgets(win.NativeWindowHandle):
+                try:
+                    auto.ControlFromHandle(hwnd).GetChildren()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             for ctrl, _ in auto.WalkControl(win, includeTop=False, maxDepth=80):
                 if ctrl.ControlTypeName == "DocumentControl":
@@ -780,12 +868,21 @@ class MonitorWorker(threading.Thread):
                     continue
                 if n:
                     texts.append(n)
+                # Claude 2.37 (15.10) shows each limit as a bar, its share only in the
+                # bar's value ("18% used").
+                if getattr(ctrl, "ControlTypeName", "") == "ProgressBarControl":
+                    try:
+                        texts.append(ctrl.GetValuePattern().Value.strip())
+                    except Exception:
+                        pass
         except Exception:
             return {}
         rows, cur = {}, None
         for tx in texts:
             low = tx.lower()
-            if "5-hour" in low:
+            # Claude now calls the 5-hour window the session limit ("67% of session
+            # limit" on the meter, 14.10); the panel row may read "Current session".
+            if "5-hour" in low or low.startswith(("session", "current session")):
                 cur = "5h"; rows.setdefault(cur, {})
             elif low.startswith("weekly") and "fable" in low:
                 cur = "weekly_fable"; rows.setdefault(cur, {})
@@ -794,7 +891,7 @@ class MonitorWorker(threading.Thread):
             elif low.startswith(("context", "plan usage", "view usage", "usage")):
                 cur = None
             elif cur:
-                mp = re.fullmatch(r"(\d{1,3})\s*%", tx)
+                mp = re.fullmatch(r"(\d{1,3})\s*%(?:\s*used)?", tx, re.IGNORECASE)
                 if mp and "pct" not in rows[cur]:
                     rows[cur]["pct"] = int(mp.group(1))
                 elif "reset" in low and "reset" not in rows[cur]:
@@ -950,14 +1047,14 @@ class App(tk.Tk):
     WORDMARK = "CLAUDE AUTO-RESUME"
     WORKER = MonitorWorker
     FEATURES = ("prefer_try_again", "retry_api_errors", "auto_approach", "auto_permissions",
-                "pause_on_foreign_input", "handover_enabled")
+                "auto_next_step", "auto_sessions", "pause_on_foreign_input", "handover_enabled")
+    WRAPUP_MESSAGE = True        # Claude Code can wrap up at the limit; it gets a text of its own
     LOG_KEEP = 2000              # log lines the window keeps (and shows again after a language switch)
 
     def __init__(self):
         super().__init__()
         self.title(self.TITLE)
-        self.geometry("860x960")
-        self.minsize(800, 660)
+        self.minsize(800, WINDOW_MIN_HEIGHT)
         self.configure(bg=THEME["bg"])
 
         self.cfg = self._load_config()
@@ -986,6 +1083,7 @@ class App(tk.Tk):
         self._build_ui()
         self._retext()
         self._update_lang_buttons()
+        self._fit_height()
         enable_dark_titlebar(self)
 
         self.worker.start()
@@ -993,6 +1091,16 @@ class App(tk.Tk):
         self.after(200, self._poll_queue)
         self.after(250, self._tick_ui)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _fit_height(self):
+        """Open tall enough for the whole page, the log included (16.10: the page had
+        outgrown a fixed 960 px and the log was cut off), but never taller than the
+        screen leaves room for: the page scrolls then."""
+        from launcher import work_area
+        self.update_idletasks()
+        _, top, _, bottom = work_area()
+        height = min(self.page.winfo_reqheight(), bottom - top - WINDOW_RESERVE)
+        self.geometry(f"{WINDOW_WIDTH}x{max(WINDOW_MIN_HEIGHT, height)}")
 
     # ------------------------------------------------------------------- style
     def _build_styles(self):
@@ -1030,6 +1138,13 @@ class App(tk.Tk):
                         foreground=t["text"], indicatorbackground=t["panel_hi"],
                         indicatorforeground=t["amber"])
         style.map("Panel.TCheckbutton",
+                  background=[("active", t["panel"])],
+                  indicatorbackground=[("selected", t["panel_hi"])],
+                  indicatorforeground=[("selected", t["amber"])])
+        style.configure("Panel.TRadiobutton", background=t["panel"],
+                        foreground=t["text"], indicatorbackground=t["panel_hi"],
+                        indicatorforeground=t["amber"])
+        style.map("Panel.TRadiobutton",
                   background=[("active", t["panel"])],
                   indicatorbackground=[("selected", t["panel_hi"])],
                   indicatorforeground=[("selected", t["amber"])])
@@ -1083,16 +1198,18 @@ class App(tk.Tk):
         page_scroll.pack(side="right", fill="y")
         self.page_canvas.pack(side="left", fill="both", expand=True)
         self.page_canvas.configure(yscrollcommand=page_scroll.set)
-        root = ttk.Frame(self.page_canvas, padding=12)
+        root = self.page = ttk.Frame(self.page_canvas, padding=12)
         page_id = self.page_canvas.create_window(0, 0, anchor="nw", window=root)
         root.bind("<Configure>", lambda _e: self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all")))
         self.page_canvas.bind("<Configure>", lambda e: self.page_canvas.itemconfigure(page_id, width=e.width))
 
-        # --- top bar: wordmark + EN/PL toggle ---
+        # --- top bar: wordmark + version + EN/PL toggle ---
         top = tk.Frame(root, bg=t["bg"])
         top.pack(fill="x", pady=(0, 8))
         tk.Label(top, text=self.WORDMARK, bg=t["bg"], fg=t["muted"],
                  font=(self.font_ui, 9, "bold")).pack(side="left")
+        tk.Label(top, text=VERSION, bg=t["bg"], fg=t["muted"],
+                 font=(self.font_ui, 9)).pack(side="left", padx=(8, 0))
         seg = tk.Frame(top, bg=t["border"])
         seg.pack(side="right")
         self.lang_btns = {}
@@ -1236,6 +1353,13 @@ class App(tk.Tk):
             icon = self._help_icon(row, key)
             icon.pack(side="left", padx=(6, 0))
             self.feature_vars[key], self.feature_checks[key], self.feature_help[key] = var, check, icon
+            if key == "auto_sessions":
+                # Which button answers the card: Claude's own labels, the same in both languages.
+                self.var_session_choice = tk.StringVar(value=self.cfg.get("session_choice", "start"))
+                for value, label in (("start", "Start"), ("here", "Do it here")):
+                    ttk.Radiobutton(row, text=label, value=value, variable=self.var_session_choice,
+                                    style="Panel.TRadiobutton", command=self._push_config
+                                    ).pack(side="left", padx=(12, 0))
 
         panel_in = self.settings_tab
 
@@ -1367,6 +1491,31 @@ class App(tk.Tk):
         self.grip_msg.bind("<B1-Motion>", self._on_grip_drag)
         self.grip_msg.bind("<ButtonRelease-1>", lambda _e: self._on_grip_release())
 
+        self.txt_wrapup = None
+        if self.WRAPUP_MESSAGE:
+            row_wrapup = tk.Frame(panel_in, bg=t["panel"])
+            row_wrapup.pack(fill="x", pady=(0, 8))
+            row_wrapup_head = tk.Frame(row_wrapup, bg=t["panel"])
+            row_wrapup_head.pack(fill="x")
+            self.lbl_wrapup = tk.Label(row_wrapup_head, text="", bg=t["panel"],
+                                       fg=t["text"], font=(self.font_ui, 10))
+            self.lbl_wrapup.pack(side="left")
+            self._help_icon(row_wrapup_head, "wrapup_message").pack(side="left", padx=(8, 0))
+            wrapup_wrap = tk.Frame(row_wrapup, bg=t["border"])
+            wrapup_wrap.pack(fill="x", pady=(4, 0))
+            self.txt_wrapup = tk.Text(
+                wrapup_wrap, height=3, wrap="word",
+                font=(self.font_ui, 10), bg=t["log_bg"], fg=t["text"],
+                insertbackground=t["text"], relief="flat", highlightthickness=0,
+                selectbackground=t["amber_dim"], padx=8, pady=6)
+            wrapup_scroll = ttk.Scrollbar(wrapup_wrap, orient="vertical",
+                                          command=self.txt_wrapup.yview)
+            self.txt_wrapup.configure(yscrollcommand=wrapup_scroll.set)
+            self.txt_wrapup.pack(side="left", fill="x", expand=True, padx=(1, 0), pady=1)
+            wrapup_scroll.pack(side="right", fill="y", pady=1, padx=(0, 1))
+            self.txt_wrapup.insert("1.0", self.cfg.get("wrapup_message") or DEFAULT_WRAPUP_MESSAGE)
+            self.txt_wrapup.bind("<FocusOut>", lambda _e: self._commit_message())
+
         row_manual = tk.Frame(panel_in, bg=t["panel"])
         row_manual.pack(fill="x")
         self.lbl_know_reset = tk.Label(row_manual, text="", bg=t["panel"],
@@ -1465,6 +1614,8 @@ class App(tk.Tk):
         self.chk_awake.config(text=self._T("chk_awake"))
         self.lbl_message.config(text=self._T("lbl_message"))
         self.lbl_msg_hint.config(text=self._T("hint_message"))
+        if self.txt_wrapup is not None:
+            self.lbl_wrapup.config(text=self._T("lbl_wrapup_message"))
         self.lbl_know_reset.config(text=self._T("lbl_know_reset"))
         self.btn_arm.config(text=self._T("btn_arm"))
         self.lbl_arm_hint.config(text=self._T("lbl_arm_hint"))
@@ -1746,12 +1897,19 @@ class App(tk.Tk):
         line break inside the message would submit it half-written."""
         return " ".join(self.txt_message.get("1.0", "end-1c").split()) or DEFAULT_MESSAGE
 
+    def _wrapup_text(self):
+        """The wrap-up box as a single line, for the same reason."""
+        return " ".join(self.txt_wrapup.get("1.0", "end-1c").split()) or DEFAULT_WRAPUP_MESSAGE
+
     def _commit_message(self):
-        """Save the custom message; fall back to the default one when left blank."""
-        msg = self._message_text()
-        if msg != self.txt_message.get("1.0", "end-1c"):
-            self.txt_message.delete("1.0", "end")
-            self.txt_message.insert("1.0", msg)
+        """Save the custom messages; each falls back to its default when left blank."""
+        boxes = [(self.txt_message, self._message_text())]
+        if self.txt_wrapup is not None:
+            boxes.append((self.txt_wrapup, self._wrapup_text()))
+        for box, msg in boxes:
+            if msg != box.get("1.0", "end-1c"):
+                box.delete("1.0", "end")
+                box.insert("1.0", msg)
         self._push_config()
 
     def _pick_plan_folder(self):
@@ -1846,9 +2004,11 @@ class App(tk.Tk):
             "auto_send": bool(self.var_autosend.get()),
             "keep_awake": bool(self.var_awake.get()),
             "message": message,
+            **({"wrapup_message": self._wrapup_text()} if self.txt_wrapup is not None else {}),
             "watch_scope": "selected" if self.checked_chats else "open",
             "selected_chats": sorted(self.checked_chats),
             **{key: bool(var.get()) for key, var in self.feature_vars.items()},
+            **({"session_choice": self.var_session_choice.get()} if "auto_sessions" in self.FEATURES else {}),
         }
         self.cfg.update(payload)
         self._save_config()

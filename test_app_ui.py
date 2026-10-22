@@ -5,6 +5,7 @@ import os
 import queue
 import shutil
 import tempfile
+import tkinter as tk
 import types
 import unittest
 from unittest.mock import patch
@@ -403,6 +404,28 @@ class AppUITests(unittest.TestCase):
         self.assertEqual(self.saved[-1]["message"], app.DEFAULT_MESSAGE)
         self.assertEqual(self.ui.txt_message.get("1.0", "end-1c"), app.DEFAULT_MESSAGE)
 
+    def test_wrap_up_message_has_its_own_box_with_help(self):
+        self.assertEqual(self.ui.txt_wrapup.get("1.0", "end-1c"), app.DEFAULT_WRAPUP_MESSAGE)
+        self.assertTrue(self.ui.txt_wrapup.bind("<FocusOut>"))
+        self.assertIn("wrapup_message", self.ui.help_icons)
+        for lang in ("en", "pl"):
+            for key in ("lbl_wrapup_message", "wrapup_message_help", "waiting_wrapup_at", "wrapup_message"):
+                self.assertNotEqual(app.tr(lang, key), key, (lang, key))
+            self.assertIn("2.1.277", app.tr(lang, "wrapup_message_help"))
+        self.ui._set_lang("pl")
+        self.assertEqual(self.ui.lbl_wrapup.cget("text"), app.tr("pl", "lbl_wrapup_message"))
+
+    def test_wrap_up_message_is_saved_on_one_line_and_a_blank_one_falls_back(self):
+        self.ui.txt_wrapup.delete("1.0", "end")
+        self.ui.txt_wrapup.insert("1.0", "Carry on\nwith what was left.")
+        self.ui._commit_message()
+        self.assertEqual(self.saved[-1]["wrapup_message"], "Carry on with what was left.")
+        self.assertEqual(self.ui.txt_wrapup.get("1.0", "end-1c"), "Carry on with what was left.")
+        self.ui.txt_wrapup.delete("1.0", "end")
+        self.ui._commit_message()
+        self.assertEqual(self.saved[-1]["wrapup_message"], app.DEFAULT_WRAPUP_MESSAGE)
+        self.assertEqual(self.ui.txt_wrapup.get("1.0", "end-1c"), app.DEFAULT_WRAPUP_MESSAGE)
+
     def test_countdown_length_is_a_saved_setting(self):
         self.ui.var_start_delay.set(25)
         self.ui._push_config()
@@ -597,6 +620,54 @@ class ErrorTextTests(unittest.TestCase):
     def test_the_chatgpt_window_names_itself_in_shared_errors(self):
         self.assertEqual(app.tr("en", "Claude is not foreground", table=gpt.STRINGS), "ChatGPT is not foreground")
         self.assertIn("ChatGPT", app.tr("pl", "Claude window is unavailable", table=gpt.STRINGS))
+
+
+class Windowed:
+    """Opens a real Auto-Resume window, hidden, with the worker and the config file kept out."""
+
+    def open(self, cls):
+        for p in (patch.object(app, "load_config", lambda path=None, defaults=None: dict(defaults or app.DEFAULT_CONFIG)),
+                  patch.object(app, "save_config", lambda cfg, path=None: None),
+                  patch.object(cls.WORKER, "start", lambda w: None)):
+            p.start()
+            self.addCleanup(p.stop)
+        ui = cls()
+        self.addCleanup(ui.destroy)
+        ui.withdraw()
+        ui.update_idletasks()
+        return ui
+
+
+class WindowHeightTests(Windowed, unittest.TestCase):
+    """16.10: the page had outgrown the fixed 960 px and the log was cut off at the bottom."""
+
+    @staticmethod
+    def height(ui):
+        return int(ui.geometry().split("x", 1)[1].split("+", 1)[0])
+
+    def test_the_window_opens_tall_enough_for_the_whole_page(self):
+        for cls in (app.App, gpt.ChatGPTApp):
+            with self.subTest(cls=cls.__name__), patch("launcher.work_area", lambda: (0, 0, 2560, 2000)):
+                ui = self.open(cls)
+                self.assertGreaterEqual(self.height(ui), ui.page.winfo_reqheight())
+
+    def test_never_taller_than_the_screen_leaves_room_for(self):
+        with patch("launcher.work_area", lambda: (0, 0, 1920, 800)):
+            ui = self.open(app.App)
+        self.assertLessEqual(self.height(ui), 800 - app.WINDOW_RESERVE)
+
+
+class VersionTests(Windowed, unittest.TestCase):
+    """The window says which version of the program it is, in its top-left corner (20.10)."""
+
+    def test_the_version_sits_beside_the_wordmark(self):
+        for cls in (app.App, gpt.ChatGPTApp):
+            with self.subTest(cls=cls.__name__):
+                ui = self.open(cls)
+                top = ui.page.winfo_children()[0]          # the bar above everything else
+                labels = [w for w in top.pack_slaves() if isinstance(w, tk.Label)]
+                self.assertEqual([w.cget("text") for w in labels[:2]], [cls.WORDMARK, app.VERSION])
+                self.assertEqual(labels[1].pack_info()["side"], "left")
 
 
 if __name__ == "__main__":

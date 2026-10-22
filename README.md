@@ -46,6 +46,10 @@ too, including the lines written before you switched.
   while you were working, but it has reset now. Please continue from where you left
   off if possible autonomously."* — or clicks **Try again** if you prefer
   ([Custom message](#custom-message), [Try again](#use-the-try-again-button)).
+- Recognizes Claude Code's **wrap-up** too: since version 2.1.277 a response that
+  hits the limit may run on to a safe point and end with *"Wrapped up past your
+  usage limit"*. After the reset such a conversation gets a text of its own that
+  points it at what it listed as left ([Wrap-up at the limit](#message-after-a-wrap-up)).
 - Never types into a conversation that is still blocked, still working, or holds a
   draft of yours. Each conversation has its own timer and status.
 - **Resume now…** and **Know the reset time? → Arm** to do it by hand. Keeps the PC
@@ -66,10 +70,16 @@ too, including the lines written before you switched.
   option marked *Recommended*, or asks Claude to choose.
 - [Approves permission prompts](#approve-permission-prompts-automatically) —
   *Always allow* or *Allow once*, never *Deny*.
+- [Accepts the next step](#accept-the-next-step-automatically) — clicks the main
+  button of the box a turn ends with (*"Do you approve this direction?"* →
+  *"Yes, go ahead"*), in any language, never *Commit*, *Create PR* or *Merge*.
+- [Answers suggested new sessions](#answer-suggested-new-sessions-automatically) —
+  *Start* or *Do it here*, your choice, and watches the session it started.
 - [Hands the work over](#hand-the-work-over-when-the-context-fills-up) when a
   conversation's context fills up: the agent writes a handover, and a fresh
-  conversation in the same project reads it and carries on — section by section
-  through your plan, if you give it one.
+  conversation in the same folder (and branch), with the same model, effort and
+  permission mode, reads it and carries on — section by section through your plan,
+  if you give it one.
 
 **Staying out of your way**
 - [Holds still](#wait-while-someone-else-uses-the-mouse) while you use the mouse or
@@ -102,24 +112,37 @@ too, including the lines written before you switched.
    **"Session limit reached"** card at the end of the conversation; elsewhere the
    "Usage limit reached" strip next to the chat box. That notice is Claude's own
    "session blocked" signal, so it's the primary trigger — the usage meter can lag
-   or stick below 100% while the session is already blocked.
+   or stick below 100% while the session is already blocked. When Claude Code
+   **wraps up** instead (2.1.277+), the turn ends with Claude's own summary and no
+   card; the strip then reads *"Usage limit reached · wrapping up"* while it
+   finishes and *"Wrapped up past your usage limit"* afterwards, and that counts
+   as the limit. The usage meter and the plain strip belong to the whole account —
+   once the limit runs out they show it in every conversation — so they count only
+   for a conversation that was working when the limit came. One that had finished
+   its turn and waits for your answer is left alone: the limit stopped nothing
+   there. A forecast such as *"On pace to hit your weekly limit early"* is no
+   limit at all.
 3. **Finds the reset time.** Claude doesn't always print it on the notice
    (*"Try again after your session limit resets."*), so the tool checks, in turn:
    the notice text, the usage meter in the bottom bar
-   (*"100% of 5-hour limit, Resets at 9:30 AM"*), and the exact reset time that
-   Claude Code writes to its local log when a request is rejected. As a last
-   resort it opens Claude's usage panel and reads the **5-hour limit** row —
-   ignoring the weekly and per-model limits, so a maxed-out weekly (e.g. Fable)
-   limit never triggers a false alarm.
+   (*"Usage: Weekly · all models: 28%, Resets Mon 6:00 PM"*), and the exact reset
+   time that Claude Code writes to its local log when a request is rejected (a
+   rejection whose reset passed over five hours ago belongs to an older limit and
+   is ignored). As a
+   last resort it opens Claude's usage panel and reads the **Session limit** row
+   (the 5-hour limit; older builds called it so) — ignoring the weekly and
+   per-model limits, so a maxed-out weekly (e.g. Fable) limit never triggers a
+   false alarm.
 4. **Never types into a blocked conversation.** If no reset time can be found,
    it waits until the notice disappears — or at most 5 hours, the length of the
    limit window — instead of retrying blindly.
 5. **One minute after the reset** it brings the interrupted conversation to the
    front and sends your message — by default *"I hit my usage limit while you
    were working, but it has reset now. Please continue from where you left off if
-   possible autonomously."* You can also choose to use **Try again** when that
-   button is available. Each conversation has its own timer, so one waiting chat
-   does not hold up the others.
+   possible autonomously."* — or, after a wrap-up, the **message after a
+   wrap-up**. You can also choose to use **Try again** when that button is
+   available. Each conversation has its own timer, so one waiting chat does not
+   hold up the others.
 
 6. **Waits while someone else is using the mouse.** Every click and keystroke of
    its own is a brief takeover of your mouse and keyboard, so it holds still when
@@ -234,6 +257,28 @@ you type is sent as **one message**, so line breaks are collapsed into spaces �
 Enter submits in Claude's composer, so a line break inside the message would
 send it half-written.
 
+### Message after a wrap-up
+
+Since version 2.1.277 Claude Code has a **wrap-up allowance**: when the limit
+runs out in the middle of a response, Claude gets a little extra to reach a safe
+point, then stops by itself and writes what is done and what is left. The
+transcript ends with that summary instead of the *"Session limit reached"* card,
+and the strip under the conversation says *"Wrapped up past your usage limit"*
+next to the reset time.
+
+The tool treats this as the limit and, after the reset, sends such a conversation
+the **"Message after a wrap-up"** from the **Settings** tab (also used by
+**"Resume now…"**). By default:
+
+> You stopped at a safe point because my usage limit was reached, and listed what
+> was done and what was left. The limit has reset now — please carry on with what
+> was left, autonomously if possible.
+
+Leave the box blank to fall back to the default. A conversation the limit cut off
+abruptly still gets the **"Message to send"** above. If the wrap-up strip is still
+on screen after the conversation was resumed — by the tool or by you — it is not
+taken for a new limit.
+
 ### Multiple conversations and split views
 
 With nothing checked, the tool watches the chats currently open in the selected
@@ -248,6 +293,16 @@ Cowork**: switch modes in Claude and click **Read chats** again. Checks are
 **not** saved: every run starts with nothing checked, so an old choice can never
 send messages to a chat you forgot about. When a checked conversation is handed
 over to a new one, the check moves to the new conversation.
+
+A session started from a watched conversation is watched too, whoever started it —
+the tool, you, or Claude itself. The tool spots it in the sidebar, where
+its row says *"Started by Claude from …"* or *"Started from a suggestion in …"*: a
+new one as soon as it shows up, and one that was already there when watching began
+only if it still runs or waits for an answer (*Running*, *Needs input*), so finished
+ones stay out. If the tool was watching the open conversations, it now watches the
+checked ones, the new session among them, and the log says so:
+`Research: also watching the new session “Tests”`. Uncheck it and it stays out
+until the next run.
 
 The list includes chats currently loaded in Claude's sidebar, including pinned
 chats when visible. To add an older chat, open it or expand its sidebar section,
@@ -280,22 +335,25 @@ Sign-in, access and invalid-request errors need your attention directly.
 
 This option is **off by default**. Turn on **Answer approach questions
 automatically** to let the tool pick answers marked **Recommended** (including
-Polish labels such as **rekomendacja**). Claude asks two kinds of question, and
-cards with several questions are answered one question at a time:
-
-- **Single choice** — clicking an option is the answer (Claude moves straight to
-  the next question), so the tool clicks the recommended option.
-- **Multiple choice** — the tool ticks every recommended option, then clicks
-  **Next** or **Submit**.
+Polish labels such as **rekomendacja**). Since Claude Desktop 2.37 the question
+card sits at the end of the conversation itself, with its first option already
+picked; the tool picks exactly the recommended options instead, checks that the
+card shows them, and clicks **Submit** (or **Next** on a card with several
+questions, which are answered one at a time). On a single-choice question the
+pick moves to the recommended option; on a multiple-choice one every recommended
+option is ticked and the others are cleared.
 
 If no answer is marked as recommended — or a single-choice question recommends
-more than one — it enters this in **Other** and submits:
+more than one — it picks **Other**, enters this and submits:
 
 > Pick your recommended option(s).
 
-It leaves answers you have already started or selected alone. Permission prompts
-have their own option (below). Turning off **Send automatically** also turns off
-automatic retries, approach answers and permission approvals.
+It leaves a card alone when you have started typing an answer in **Other**.
+(Older Claude builds docked the card above the composer and answered a
+single-choice question on the first click; those still work too.) Permission
+prompts have their own option (below). Turning off **Send automatically** also
+turns off automatic retries, approach answers, permission approvals and card
+clicks (next step, new sessions).
 
 ### Approve permission prompts automatically
 
@@ -304,7 +362,9 @@ some actions and waits for your permission — *"Allow Claude to fetch https://�
 *"Allow Claude to run …?"*. Turn on **Approve permission prompts automatically**
 and the tool answers these cards for you:
 
-- it clicks **Always allow** when the card offers it, otherwise **Allow once**;
+- it clicks **Always allow** when the card offers it, otherwise **Allow once**
+  (Claude 2.37 shows the card at the end of the conversation, with *"Always allow —
+  Applies to this session only"*);
 - it never clicks **Deny**, nor the arrow with more allow options;
 - it reacts within about 3 seconds: between the regular scans it runs a very cheap
   search for the card's buttons and reads the window only when one shows up;
@@ -314,12 +374,57 @@ and the tool answers these cards for you:
 
 Every approval goes to the log, e.g.
 `Research: Clicked Always allow — Allow Claude to fetch https://…?`.
-**Always allow** saves a lasting rule in Claude's settings (usually the project's
-`.claude/settings.local.json`), so the same request won't ask again — delete the
-rule there if you change your mind. Like the other automatic actions, it works
+In Claude 2.37 **Always allow** applies to the session only; in older builds it
+saved a lasting rule in Claude's settings (usually the project's
+`.claude/settings.local.json`), so the same request wouldn't ask again — delete
+the rule there if you change your mind. Like the other automatic actions, it works
 only in the conversations you watch, only with **Send automatically** on, and not
 before the start countdown ends. A conversation with an open permission card is
 never typed into.
+
+### Accept the next step automatically
+
+This option is **off by default**. When Claude ends a turn by asking how to go on,
+Claude Desktop draws a box at the end of the conversation: a short summary, one
+question and one or two buttons — *"Do you approve this direction?"* with *"Yes, go
+ahead"*. The conversation then waits for you. Turn on **Accept the next step
+automatically** and the tool clicks the main button:
+
+- the main button is the one Claude highlights and gives the **Ctrl+Enter**
+  shortcut — the tool reads that shortcut, not the label, so it works whatever the
+  label says and in any language (with no shortcut, it is the first button);
+- it never clicks the app's own actions in that place — *Commit*, *Create PR*,
+  *Merge*, *Archive* and the like stay with you, and the log says the box is
+  waiting for you. To be safe, a button whose label merely mentions committing,
+  merging, a pull request or archiving is left for you too;
+- it waits while the conversation works, is stopped by a limit or an error, holds a
+  draft of yours, or is being handed over. After a limit the conversation gets your
+  message after the reset, not the box's button;
+- each box is clicked once, through Windows UI Automation first (no mouse), and
+  every click goes to the log: `Research: Clicked the next step — Yes, go ahead`.
+
+### Answer suggested new sessions automatically
+
+This option is **off by default**. Claude sometimes ends with a card about a new
+session. Either it suggests extra work by itself — *"New session"* with **Start**
+and **Do it here** — or it asks whether to do a task you gave it here or in a
+session of its own — *"Start this in its own session?"* with **New session** and
+**Do it here** — and waits for the answer (the conversation shows *Stop* meanwhile).
+Turn on **Answer suggested new sessions automatically** and choose next to it:
+
+- **Start** (the default) clicks *Start* or *New session*: the work goes on in a new
+  session. The tool finds it in the sidebar (*"… Started by Claude from …"*) and
+  watches it too, as it does with sessions started there any other way. If it was
+  watching the open conversations, it now watches the checked ones — those it
+  watched plus the new session — and visits them from the sidebar;
+- **Do it here** keeps the work in the same conversation.
+
+So that a night does not turn into an avalanche of sessions, the tool starts at
+most **5** new sessions per run of watching (from *Start watching* to *Stop*); after
+that the cards wait for you. It never clicks *Options*, *Don't ask again* or the
+card's dismiss button. A suggestion shown while the conversation is still working
+waits for the turn to end; the question is answered right away, since the
+conversation waits for it.
 
 ---
 
@@ -329,9 +434,12 @@ This option is **off by default**. A long autonomous run ends twice: first the
 5-hour limit, then the context window. Turn on **Hand the work over to a new
 conversation** and the second one stops being a dead end:
 
-1. **The context is read from the conversation itself.** Claude's bottom-bar meter
-   says it out loud — *"Usage: Context 195.8k / 1M (20%)"* — and the tool reads it
-   on every scan, per conversation, split views included.
+1. **The context is read from the conversation itself.** Claude 2.37 shows it in
+   the **Session details** panel beside the conversation — *"Context 44%"*, or
+   *"453.6k / 1M"* with the section open — and the conversation's own Claude Code
+   log has the exact token count, so the tool combines the two on every scan, per
+   conversation, split views included. (Older builds said it on the bottom-bar
+   meter — *"Usage: Context 195.8k / 1M (20%)"* — which is still read.)
 2. **At the threshold it interrupts the work.** It clicks **Stop** and asks the
    agent, in one message, to write a handover for its successor: the goal, the
    stage of the plan, what is done, what is in progress and in what exact state,
@@ -340,15 +448,34 @@ conversation** and the second one stops being a dead end:
    end of the reply (`HANDOVER READY <id>: <path>`) and the file itself in
    `.handover\HANDOVER-<id>.md` inside the project. No marker or no file means one
    reminder, and then **Needs attention**: nothing is sent blindly.
-4. **Then it opens a new conversation in the same project.** The project is taken
-   from the handover's own path and confirmed on the new conversation's screen
-   before a single character is typed. If it cannot be confirmed, the tool stops
-   and says so — the handover is already written, so you can take over by hand.
+4. **Then it opens a new conversation that works where and how the old one did.**
+   - **The same folder** — taken from the handover's own path and confirmed on
+     the new conversation's screen (Claude 2.37: **Environment**, older folders
+     under **More**) before a single character is typed. The folder keeps its
+     branch, which the tool reads from git's own files and names in the new
+     agent's instructions; ChatGPT also has to show that branch and run the chat
+     **locally**. If any of it cannot be confirmed, the tool stops and says so —
+     the handover is already written, so you can take over by hand.
+   - **The same model, effort and permission mode** (in ChatGPT: model and
+     permissions) — read from the old conversation's bar and set from the new
+     one's menus, because a new conversation starts with whatever was used last.
+     What cannot be set is only reported in the log; the handover goes on with the
+     app's default for it.
 5. **The new conversation is told what to do**: read the handover, get to know the
    project with **graphify** (updating `graphify-out/` when it is already there),
    check the state of the work itself, and carry on. It watches the new
    conversation from then on, so the chain can go on: handover two, three, and so
    forth.
+
+**After a wrap-up.** A conversation that wrapped up at the limit (Claude Code 2.1.277+)
+with its context over the threshold is not asked for a handover after the reset: after
+the five-hour wait the prompt cache is gone, so that one message would make Claude read
+the whole context again. The tool takes the summary Claude wrote when it wrapped up —
+what was done and what was left — from the conversation's own log, saves it as
+`.handover\HANDOVER-<id>.md` with a header saying where the work was, and opens the new
+conversation as above. The new agent first gets to know the project and checks the state
+of the work, then reads the summary and carries on with what was left. Without such a
+summary in the log the usual request goes out.
 
 Its settings appear on the **Settings** tab, in a group of their own, once the
 option is ticked — and each has a **?** that explains it in plain words:
@@ -378,6 +505,8 @@ relies on. **Restore defaults** brings the built-in texts back.
 
 The log records every step, e.g.
 `Onboarding: context 712k / 1M (71%) — stopping the work and asking for a handover.`
+and, once the new conversation is set up,
+`Onboarding: the new conversation is set up — auto-resume · main · Opus 5.5 · Extra · Bypass permissions.`
 
 ---
 
@@ -524,16 +653,19 @@ Available in the app window; saved to `auto_continue_config.json`:
 | Countdown before taking control (s) | 10 | warning time after "Start watching" before the tool starts switching chats (0 = none) |
 | Conversations to watch | the open ones | nothing checked: the conversations open in Claude; otherwise exactly the checked ones (not saved) |
 | Message to send | *I hit my usage limit while you were working, but it has reset now. Please continue from where you left off if possible autonomously.* | the text sent when the limit resets |
+| Message after a wrap-up | *You stopped at a safe point because my usage limit was reached, and listed what was done and what was left. The limit has reset now — please carry on with what was left, autonomously if possible.* | the text sent after the reset to a conversation that wrapped up at the limit (Claude Code 2.1.277+) |
 | Prefer “Try again” after a limit reset | Off | use the retry button when available instead of your message |
 | Retry API and server errors | On | retry interrupted chats after temporary errors |
 | Answer approach questions automatically | Off | submit recommended answers, or ask Claude to choose via Other |
 | Approve permission prompts automatically | Off | click Always allow (or Allow once) on Claude's permission prompts |
+| Accept the next step automatically | Off | click the main (Ctrl+Enter) button of the box a turn ends with; never the app's own actions |
+| Answer suggested new sessions automatically | Off, *Start* | click *Start* / *New session* (at most 5 per run, and watch the new session) or *Do it here* |
 | Pause while someone else uses the mouse | ✔ | hold still while you or an agent are using the mouse |
 | Calm needed before acting (s) | 30 | how long the mouse and keyboard must be untouched |
 | Hand the work over to a new conversation | Off | ask for a handover at the context threshold and start a fresh conversation |
 | Context threshold | `700k` | `700k`, `0.7M`, `700000` or `70%` of the model's window (shown while the handover is on) |
 | Plan folder | empty | your project's plan, split into sections the next agent takes one by one (optional; shown while the handover is on) |
-| Send automatically | ✔ | turn off automatic messages, retries, approach answers and permission approvals |
+| Send automatically | ✔ | turn off automatic messages, retries, approach answers, permission approvals and card clicks |
 | Keep the PC awake | ✔ | blocks system and display sleep while watching |
 
 More advanced fields — number of retries, retry spacing, the 5-hour "hit"
@@ -623,26 +755,44 @@ rate-limit snapshots and usage-limit rejections are parsed.
 
 - The window (the Claude app is Electron/Chromium) is read through **Windows UI
   Automation** (the `uiautomation` package). Chromium builds its accessibility
-  tree only on demand, so the tool first "wakes" it by querying the documents'
-  `TextPattern`.
+  tree only on demand, so the tool first "wakes" it: Claude 2.37 shows no page at
+  all until its render widget window (`Chrome_RenderWidgetHostHWND`) is asked
+  directly, older builds until the documents' `TextPattern` was queried. A window
+  that still shows no page counts as unread, never as "no conversations".
 - **The 5-hour limit is read from Claude's own usage panel.** The bottom-bar
   meter only shows the *highest* of all your limits, so a maxed weekly Fable
   limit makes it read "100%" even when the 5-hour limit is fine. To disambiguate,
   the tool clicks the meter to open the **Usage** popover and reads the specific
-  "5-hour limit" row (percentage + reset), then closes it with Escape and
-  restores the cursor. It only opens the popover when the cheap bottom-bar meter
+  "Session limit" (formerly "5-hour limit") row — its percentage, which Claude 2.37
+  shows only as the value of a progress bar ("18% used"), and its reset — then
+  closes it with Escape and restores the cursor. It only opens the popover when the cheap bottom-bar meter
   is maxed, and backs off afterwards, to avoid flashing it constantly.
 - **The reset time is taken from the latest source that knows it.** Claude Code
   records every rejected request in `~/.claude/projects/<project>/<session>.jsonl`
   with `quotaLimits.resetsAt`; limits belong to the account, so the newest
   rejection gives the reset even when the conversation's card leaves the time
   out. Notice text and the usage meter are used too; the latest future time wins.
+  Only the tails of the logs are read, so once the conversation that hit the limit
+  has written on, an older rejection may be the newest one left: a reset that
+  passed more than five hours ago (the length of the limit window) is therefore
+  ignored, and the conversation waits as it does when no reset is known.
+  A wrap-up logs no rejection (only a `usageLimitNote: "wrap_up"` record), so for
+  a wrap-up the log is skipped: a rejection found there belongs to an older limit.
+- **The context of a conversation** comes from the window when it shows it (the
+  **Session details** panel in 2.37, the bottom-bar meter before) and from the
+  conversation's own log: the newest `.jsonl` whose `custom-title` is the
+  conversation's title, where the last reply's input plus prompt-cache reads and
+  writes add up to the tokens in the context.
 - Before acting, the tool checks the conversation and its own message box or
   retry button. It skips missing or ambiguous chats.
 - **A permission prompt is recognized by its buttons**: a card with *Deny* plus
   *Always allow* and/or *Allow once* (their names end with the key digit, e.g.
-  `Allow once 2`), outside the transcript and never a question card — so an
-  answer that merely mentions "Always allow" is not mistaken for one. The quick
+  `Allow once 2`, or carry a note: *"Always allow , Applies to this session
+  only"*), docked above the composer or — in Claude 2.37 — at the end of the
+  conversation, after your last message, and never a question card, so an answer that
+  merely mentions "Always allow" is not mistaken for one. (Claude 2.37 shows a long
+  message in parts and leaves the oldest ones unloaded, so the end of the conversation is
+  everything after your last message, not just the last message's first part.) The quick
   check between scans is a single native UI Automation search (~30 ms).
 - Each conversation is tracked separately: watch for an interruption, wait for
   its reset or retry time, resume, then check the result.
@@ -692,6 +842,9 @@ rate-limit snapshots and usage-limit rejections are parsed.
 - `py inspect_claude.py` / `py inspect_chatgpt.py` / `py tools/probe_ui.py` print what
   the tool sees in a window — the first step when a new app version changes its
   layout. Conversation text is left out.
+- `py tools/live_check.py` goes through every open conversation in Claude and ChatGPT and
+  prints what the tool reads there: the limit and wrap-up signals, a question or
+  permission card, the context and the model, effort and permission mode. It only reads.
 - `py tools/readme_screenshots.py` draws the screenshots in `docs/` from sample
   conversations; `tools/make_app_icons.py` and `tools/make_brain_icon.py` draw the
   picker's pictures.

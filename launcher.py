@@ -30,7 +30,7 @@ TILES = (
          scripts=("claude_auto_continue.py", "chatgpt_auto_continue.py"), apps=("claude", "chatgpt")),
 )
 APP_NAMES = {"claude": "Claude", "chatgpt": "ChatGPT"}
-AUTO_RESUME_SIZE = (860, 960)     # the Auto-Resume window (claude_auto_continue.App)
+AUTO_RESUME_SIZE = (860, 1110)    # the Auto-Resume window (claude_auto_continue.App), as tall as its page
 
 # Same night palette as the Auto-Resume windows.
 THEME = {"bg": "#14161B", "panel": "#1C1F26", "panel_hi": "#242935", "border": "#2A2E38",

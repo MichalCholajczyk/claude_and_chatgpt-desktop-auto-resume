@@ -11,17 +11,27 @@ import queue
 import sys
 
 import chatgpt_auto_continue as gpt
-from chatgpt_automation import composer_box, discover, document_title, last_turn, signals
+from chatgpt_automation import (APP_TITLES, HEADER_BAND, composer_box, discover, document_title,
+                                last_turn, signals)
 
 
 def why_no_conversation(root):
-    """What discover() needs to see an open conversation, as found in this window."""
+    """What discover() needs to see an open conversation, as found in this window: one main
+    area, a page named after a conversation (not after the app or a screen), that name in
+    the header band at the top (a text in the window's top bar since 14.10, a button
+    before) and one composer."""
     nodes = list(root.walk())
     main = [n for n in nodes if n.role == "main"]
     title = document_title(nodes)
+    band = main[0].rect[1] + HEADER_BAND if len(main) == 1 else None
+    headers = [n for n in nodes if band is not None and title and n.type in ("ButtonControl", "TextControl")
+               and n.name.strip() == title and n.visible and n.rect[1] < band
+               and not any(a.role in ("navigation", "complementary") for a in n.ancestors())]
     return dict(main_landmarks=len(main),
+                page_title=title,
+                app_page=bool(title) and title.casefold() in APP_TITLES,
                 visible_documents=[n.name for n in nodes if n.type == "DocumentControl" and n.visible],
-                title_buttons=sum(1 for n in nodes if n.type == "ButtonControl" and title and n.name.strip() == title),
+                title_in_header=len(headers),
                 composers=sum(1 for n in nodes if n.type == "EditControl" and n.visible and composer_box(n)))
 
 

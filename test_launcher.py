@@ -12,7 +12,13 @@ import launcher
 
 class PlacementTests(unittest.TestCase):
     def test_two_auto_resumes_side_by_side_on_a_wide_screen(self):
-        self.assertEqual(launcher.side_by_side((0, 0, 2560, 1392)), ("+412+216", "+1288+216"))
+        self.assertEqual(launcher.side_by_side((0, 0, 2560, 1392)), ("+412+141", "+1288+141"))
+
+    def test_a_window_as_tall_as_its_page_fits_the_work_area(self):
+        # 16.10: the window opens as tall as its page (1104 px with every option shown),
+        # no longer 960 px; with the title bar it must still end above the taskbar.
+        left, _ = launcher.side_by_side((0, 0, 2560, 1250))
+        self.assertLessEqual(int(left.rsplit("+", 1)[1]) + 1104 + 40, 1250)
 
     def test_narrow_screen_cascades_instead_of_stacking(self):
         left, right = launcher.side_by_side((0, 0, 1366, 728))
@@ -73,8 +79,8 @@ class LaunchTests(unittest.TestCase):
                 patch.object(launcher, "work_area", return_value=(0, 0, 2560, 1392)):
             launcher.launch_tile(launcher.TILES[2])
             launcher.launch_tile(launcher.TILES[0])
-        self.assertEqual(calls, [("claude_auto_continue.py", ("--geometry", "+412+216")),
-                                 ("chatgpt_auto_continue.py", ("--geometry", "+1288+216")),
+        self.assertEqual(calls, [("claude_auto_continue.py", ("--geometry", "+412+141")),
+                                 ("chatgpt_auto_continue.py", ("--geometry", "+1288+141")),
                                  ("chatgpt_auto_continue.py", ())])
 
     def test_a_program_already_open_is_brought_forward_not_started_again(self):
@@ -87,7 +93,7 @@ class LaunchTests(unittest.TestCase):
                 patch.object(launcher, "work_area", return_value=(0, 0, 2560, 1392)):
             launcher.launch_tile(launcher.TILES[2])
             launcher.launch_tile(launcher.TILES[1])
-        self.assertEqual(calls, [("chatgpt_auto_continue.py", ("--geometry", "+1288+216"))])
+        self.assertEqual(calls, [("chatgpt_auto_continue.py", ("--geometry", "+1288+141"))])
         self.assertEqual(forward, [55, 55])
 
     def test_gui_programs_start_without_a_console(self):

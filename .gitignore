@@ -17,3 +17,9 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# graphify knowledge graph (generated)
+graphify-out/
+
+# superpowers specs and plans (local working notes)
+docs/superpowers/

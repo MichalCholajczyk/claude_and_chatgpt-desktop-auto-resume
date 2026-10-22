@@ -7,8 +7,10 @@ the flow talks to a recording stand-in instead of the real adapter.
 import datetime as dt
 import json
 import os
+import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import queue
 
@@ -19,6 +21,9 @@ from session_automation import ClaudeUI, SessionState, signals, usage_meter
 from test_chatgpt import Window as ChatWindow
 from test_sessions import message, node, pane
 from test_support import calm_desk
+
+SUMMARY = ("Zatrzymałem się w bezpiecznym miejscu.\n\n**Zrobione:** 7 z 9.\n"
+           "**Zostało:** changelog i `C:\\docs\\plan.md`.")
 
 
 def setUpModule():
@@ -321,12 +326,98 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(handover.context_label(None), "—")
 
 
+class WrapUpTextTests(unittest.TestCase):
+    """The handover a wrap-up leaves behind: where the work was, then its own summary."""
+    INFO = dict(summary=SUMMARY, folder="C:\\work\\projekt", branch="main", at=dt.datetime(2026, 10, 15, 9, 5))
+
+    def t(self, lang="pl"):
+        return lambda key, **kw: app.tr(lang, key, **kw)
+
+    def test_the_file_names_the_place_then_gives_the_summary_word_for_word(self):
+        text = handover.wrapup_file_text(self.t("en"), "Plan grup", self.INFO, dt.datetime(2026, 10, 15, 14, 30))
+        self.assertTrue(text.splitlines()[1].startswith("# Handover from a wrap-up (Auto-Resume)"))
+        for part in ("Previous conversation: Plan grup", "Working folder: C:\\work\\projekt", "Branch: main",
+                     "Wrapped up: 2026-10-15 09:05", "The limit reset at: 2026-10-15 14:30"):
+            self.assertIn(part, text)
+        self.assertTrue(text.rstrip().endswith(SUMMARY))
+
+    def test_the_file_speaks_polish_too_and_marks_what_is_unknown(self):
+        text = handover.wrapup_file_text(self.t("pl"), "Plan grup", dict(self.INFO, branch=""), None)
+        self.assertIn("Gałąź: —", text)
+        self.assertIn("Limit zresetował się: —", text)
+        self.assertIn(SUMMARY, text)
+
+    def test_the_file_is_saved_where_a_handover_is_expected(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        path = handover.write_wrapup_file(folder, "20261015-140000", "treść ąę")
+        self.assertEqual(path, os.path.join(folder, ".handover", "HANDOVER-20261015-140000.md"))
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "treść ąę")
+        self.assertEqual(os.listdir(os.path.dirname(path)), ["HANDOVER-20261015-140000.md"])
+        self.assertEqual(handover.project_root(path), folder)
+
+    def test_the_file_keeps_the_line_breaks_as_they_are(self):
+        # Text mode on Windows would write "\r\n" for "\n", and "\r\r\n" for a "\r\n" (review, 15.10).
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        path = handover.write_wrapup_file(folder, "20261015-140000", "jeden\ndwa\r\ntrzy\n")
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), "jeden\ndwa\r\ntrzy\n".encode("utf-8"))
+
+    def test_a_file_that_cannot_be_saved_leaves_nothing_behind(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        aside = os.path.join(folder, ".handover")
+        # A lone surrogate (JSON allows it) cannot be written as UTF-8; the move can be refused.
+        with self.subTest("unwritable text"), self.assertRaises(UnicodeEncodeError):
+            handover.write_wrapup_file(folder, "20261015-140000", "urwany znak \ud83d")
+        self.assertEqual(os.listdir(aside), [])
+        with self.subTest("move refused"), patch.object(handover.os, "replace", side_effect=PermissionError("locked")), \
+                self.assertRaises(PermissionError):
+            handover.write_wrapup_file(folder, "20261015-140001", "treść")
+        self.assertEqual(os.listdir(aside), [])
+
+    def test_after_a_wrap_up_the_project_comes_before_the_summary(self):
+        path = os.path.join(r"C:\p", ".handover", "H.md")
+        text = handover.continue_message(dict(app.DEFAULT_CONFIG), self.t("en"), path, "", r"C:\p", "main",
+                                         wrapup=True)
+        self.assertLess(text.index("graphify"), text.index("summary"))
+        self.assertIn(path, text)
+        self.assertIn("You are working in C:\\p, on branch main.", text)
+        self.assertNotIn("\n", text)
+
+    def test_an_edited_handover_text_does_not_replace_the_wrap_up_one(self):
+        cfg = dict(app.DEFAULT_CONFIG, handover_continue_text="Mój własny tekst.")
+        text = handover.continue_message(cfg, self.t("pl"), "H.md", "", wrapup=True)
+        self.assertNotIn("Mój własny tekst.", text)
+        self.assertIn("podsumowanie", text)
+        self.assertTrue(handover.continue_message(cfg, self.t("pl"), "H.md", "").startswith("Mój własny tekst."))
+
+    def test_both_languages_have_every_wrap_up_handover_text(self):
+        for key in ("handover_continue_wrapup", "handover_wrapup_file_title", "handover_wrapup_file_chat",
+                    "handover_wrapup_file_folder", "handover_wrapup_file_branch", "handover_wrapup_file_at",
+                    "handover_wrapup_file_reset", "handover_wrapup_file_note"):
+            self.assertNotEqual(app.tr("en", key), key, key)
+            self.assertNotEqual(app.tr("pl", key), app.tr("en", key), key)
+
+
 class FlowUI:
     """Adapter stand-in: records what the flow asked the window to do."""
 
     def __init__(self, new_key="code:Nowa rozmowa"):
         self.calls, self.new_key = [], new_key
         self.stopped, self.fail_new, self.fail_send = True, None, None
+        self.fail_new_once = None       # a plain error, once: e.g. a draft in the old conversation
+        self.fail_resume_once = None    # the same for the scheduler's resume
+        self.resumed = []               # what the scheduler typed to resume a conversation
+
+    def resume(self, key, prefer_retry=False, api_error=False, message=None):
+        if self.fail_resume_once:
+            error, self.fail_resume_once = self.fail_resume_once, None
+            raise RuntimeError(error)
+        self.resumed.append((key, message))
+        return "message"
 
     def stop(self, pane):
         self.calls.append(("stop", pane.key))
@@ -339,6 +430,9 @@ class FlowUI:
 
     def new_chat(self, key, project, message):
         self.calls.append(("new_chat", key, project, message))
+        if self.fail_new_once:
+            error, self.fail_new_once = self.fail_new_once, None
+            raise RuntimeError(error)
         if self.fail_new:
             raise handover.HandoverRefused(self.fail_new)
         return self.new_key
@@ -564,6 +658,238 @@ class FlowTests(unittest.TestCase):
         while not self.worker.out.empty():
             events.append(self.worker.out.get_nowait())
         self.assertIn(("selection", [self.ui.new_key, "code:Beta"]), events)
+
+
+class WrapUpLog:
+    """QuotaLog stand-in: what the conversation's log says about its wrap-up."""
+
+    def __init__(self, info=None):
+        self.info, self.asked = info, []
+
+    def wrap_up_for(self, title):
+        self.asked.append(title)
+        return self.info
+
+    def context_for(self, title):
+        return None
+
+    def latest_reset(self):
+        return None
+
+
+class WrapUpHandoverTests(unittest.TestCase):
+    """After a wrap-up with the context over the threshold, the work moves on from the
+    wrap-up's own summary, without a word to the old conversation."""
+    KEY = "code:Alpha"
+
+    def setUp(self):
+        self.worker = app.MonitorWorker(queue.Queue(), dict(
+            app.DEFAULT_CONFIG, handover_enabled=True, handover_threshold="700k"))
+        self.logged = []
+        self.worker.log = lambda key, level="info", **kw: self.logged.append(key)
+        self.engine = self.worker.engine
+        self.ui = FlowUI()
+        self.engine.ui = self.ui
+        self.flow = self.engine.handover
+        self.project = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.project)
+        self.now = dt.datetime.now().replace(microsecond=0)
+        self.reset = self.now - dt.timedelta(minutes=2)
+        self.log = WrapUpLog(dict(summary=SUMMARY, folder=self.project, branch="main",
+                                  at=self.reset - dt.timedelta(hours=2)))
+        self.engine.quota = self.log
+        self.session = SessionState(phase="waiting", reason="limit", wrap_up=True, reset=self.reset,
+                                    since=self.reset - dt.timedelta(hours=2))
+        self.pane = pane("Alpha")
+
+    def observed(self, **kw):
+        base = dict(limit=False, reset=None, error=None, permanent=False, retry=None,
+                    question=None, permission=None, busy=False, last_text="",
+                    context=dict(used=712_000, window=1_000_000, pct=71))
+        return dict(base, **kw)
+
+    def state(self):
+        return self.flow.state_for(self.KEY)
+
+    def handed(self, **kw):
+        return self.flow.from_wrap_up(self.KEY, self.session, self.observed(**kw), self.now)
+
+    def new_chats(self):
+        return [call for call in self.ui.calls if call[0] == "new_chat"]
+
+    def sends(self):
+        return [call for call in self.ui.calls if call[0] == "send"]
+
+    def test_the_wrap_up_summary_becomes_the_handover(self):
+        self.assertTrue(self.handed())
+        self.assertEqual(self.sends(), [])                      # not a word to the old conversation
+        self.assertEqual(self.log.asked, ["Alpha"])
+        (_, _, folder, message), = self.new_chats()
+        self.assertEqual(folder, self.project)
+        path = self.state().path
+        self.assertEqual(os.path.dirname(path), os.path.join(self.project, ".handover"))
+        with open(path, encoding="utf-8") as f:
+            self.assertIn(SUMMARY, f.read())
+        self.assertIn(path, message)
+        self.assertLess(message.index("graphify"), message.index(path))
+        self.assertEqual((self.state().phase, self.session.phase), ("handed", "handed"))
+        self.assertIn("log_handover_from_wrapup", self.logged)
+
+    def test_without_a_summary_the_usual_request_is_left_to_go_out(self):
+        self.log.info = None
+        self.assertFalse(self.handed())
+        self.assertEqual(self.ui.calls, [])
+        self.assertEqual(self.state().phase, "idle")
+        self.assertIn("log_handover_wrapup_missing", self.logged)
+
+    def test_without_a_summary_the_resume_of_the_old_conversation_asks_for_the_handover(self):
+        # End to end through the scheduler (review, 15.10): with no summary in the log the
+        # old conversation is resumed with the usual request, not with the wrap-up text.
+        self.log.info = None
+        self.engine.step(self.KEY, self.session, self.observed(), self.now)
+        (key, message), = self.ui.resumed
+        self.assertEqual(key, self.KEY)
+        self.assertIn(".handover/HANDOVER-%s.md" % self.state().id, message)
+        self.assertEqual(self.new_chats(), [])
+        self.assertEqual((self.state().phase, self.session.phase), ("requested", "verifying"))
+        self.assertIn("log_handover_wrapup_missing", self.logged)
+
+    def test_a_resume_tried_again_does_not_repeat_why_the_summary_was_not_used(self):
+        # A draft in the old conversation stops the resume; the scheduler tries again later
+        # and finds the same: the log says it once (review, 15.10).
+        self.log.info = None
+        self.ui.fail_resume_once = "Existing draft; leaving it untouched"
+        with self.assertRaisesRegex(RuntimeError, "Existing draft"):
+            self.engine.step(self.KEY, self.session, self.observed(), self.now)
+        self.engine.step(self.KEY, self.session, self.observed(), self.now + dt.timedelta(minutes=1))
+        self.assertEqual(len(self.ui.resumed), 1)
+        self.assertEqual(self.logged.count("log_handover_wrapup_missing"), 1)
+
+    def test_a_new_reason_is_logged_again(self):
+        self.log.info = None
+        self.assertFalse(self.handed())
+        self.log.info = dict(summary=SUMMARY, folder=os.path.join(self.project, "usunięty"), branch="main",
+                             at=self.reset - dt.timedelta(hours=2))
+        self.assertFalse(self.handed())
+        self.assertEqual(self.logged.count("log_handover_wrapup_missing"), 2)
+
+    def test_a_wrap_up_from_an_earlier_limit_is_not_used(self):
+        self.log.info["at"] = self.reset - dt.timedelta(hours=6)
+        self.assertFalse(self.handed())
+        self.assertEqual(self.ui.calls, [])
+
+    def test_with_the_reset_unknown_a_wrap_up_of_this_limit_counts(self):
+        # An unknown reset can keep the conversation waiting the full five hours.
+        self.session.reset = None
+        self.session.since = self.now - dt.timedelta(hours=5, minutes=2)
+        self.log.info["at"] = self.session.since - dt.timedelta(minutes=3)
+        self.assertTrue(self.handed())
+
+    def test_with_the_reset_unknown_an_older_wrap_up_does_not(self):
+        self.session.reset = None
+        self.session.since = self.now - dt.timedelta(minutes=10)
+        self.log.info["at"] = self.session.since - dt.timedelta(hours=6)
+        self.assertFalse(self.handed())
+
+    def test_a_weekly_wrap_up_counts_from_when_the_limit_was_seen(self):
+        # A weekly limit resets days after its wrap-up: the five hours before the reset
+        # cannot hold it, but the program saw the limit as it ran out (review, 15.10).
+        self.log.info["at"] = self.reset - dt.timedelta(days=3)
+        self.session.since = self.log.info["at"] + dt.timedelta(minutes=1)
+        self.assertTrue(self.handed())
+
+    def test_a_weekly_wrap_up_long_before_the_limit_was_seen_does_not(self):
+        self.log.info["at"] = self.reset - dt.timedelta(days=3)
+        self.session.since = self.log.info["at"] + dt.timedelta(hours=6)
+        self.assertFalse(self.handed())
+
+    def test_a_wrap_up_after_the_reset_belongs_to_a_later_limit(self):
+        self.log.info["at"] = self.reset + dt.timedelta(minutes=10)
+        self.assertFalse(self.handed())
+
+    def test_without_a_first_sighting_a_wrap_up_days_old_does_not_count(self):
+        # Armed by hand, the conversation waits for a reset but its limit was never seen:
+        # only the five hours before the reset can hold its wrap-up.
+        self.session.since = None
+        self.log.info["at"] = self.reset - dt.timedelta(days=3)
+        self.assertFalse(self.handed())
+
+    def test_a_folder_that_is_gone_is_not_used(self):
+        self.log.info["folder"] = os.path.join(self.project, "usunięty")
+        self.assertFalse(self.handed())
+        self.assertEqual(self.ui.calls, [])
+
+    def test_a_file_that_cannot_be_saved_is_not_used(self):
+        with patch.object(handover, "write_wrapup_file", side_effect=OSError("disk full")):
+            self.assertFalse(self.handed())
+        self.assertEqual(self.ui.calls, [])
+        self.assertIn("log_handover_wrapup_missing", self.logged)
+
+    def test_a_summary_that_cannot_be_saved_is_not_used(self):
+        # Not every failure to save is an OSError: a lone surrogate cannot be written as UTF-8.
+        self.log.info["summary"] = "Urwany znak: \ud83d"
+        self.assertFalse(self.handed())
+        self.assertEqual(self.ui.calls, [])
+        self.assertIn("log_handover_wrapup_missing", self.logged)
+
+    def test_below_the_threshold_the_log_is_not_even_read(self):
+        self.assertFalse(self.handed(context=dict(used=300_000, window=1_000_000, pct=30)))
+        self.assertEqual(self.log.asked, [])
+
+    def test_a_refused_new_conversation_needs_attention_and_keeps_the_file(self):
+        self.ui.fail_new = "the project of the new conversation could not be confirmed"
+        self.assertTrue(self.handed())
+        self.assertEqual(self.state().phase, "attention")
+        self.assertTrue(os.path.isfile(self.state().path))
+
+    def test_a_draft_in_the_old_conversation_is_waited_out_not_resumed(self):
+        self.ui.fail_new_once = "Existing draft; leaving it untouched"
+        with self.assertRaisesRegex(RuntimeError, "Existing draft"):
+            self.engine.step(self.KEY, self.session, self.observed(), self.now)
+        later = self.now + dt.timedelta(minutes=1)
+        self.engine.step(self.KEY, self.session, self.observed(), later)     # the scheduler stays away
+        self.assertEqual(self.sends(), [])
+        self.flow.step(self.KEY, self.session, self.observed(), later, self.pane, False)
+        self.assertEqual(self.state().phase, "handed")
+        self.assertEqual(len(self.new_chats()), 2)
+
+    def fresh(self):
+        """The old conversation as a scan sees it when it is watched again: its strip still
+        says it wrapped up, with the reset long past (review, 15.10)."""
+        return SessionState(phase="waiting", reason="limit", wrap_up=True, reset=self.reset, since=self.reset)
+
+    def test_the_old_conversation_watched_again_is_not_resumed(self):
+        self.assertTrue(self.handed())
+        again = self.fresh()
+        self.engine.step(self.KEY, again, self.observed(), self.now + dt.timedelta(minutes=5))
+        self.assertEqual(self.ui.resumed, [])
+        self.assertEqual(again.phase, "handed")
+
+    def test_a_wrap_up_handed_over_before_a_restart_is_not_handed_over_again(self):
+        self.assertTrue(self.handed())
+        self.engine.reset()                                     # Stop and Start, or a new run
+        again = self.fresh()
+        self.engine.step(self.KEY, again, self.observed(), self.now + dt.timedelta(minutes=5))
+        self.assertEqual(len(self.new_chats()), 1)
+        self.assertEqual(self.ui.resumed, [])
+        self.assertEqual(len(os.listdir(os.path.join(self.project, ".handover"))), 1)
+        self.assertEqual(again.phase, "handed")
+
+    def test_an_old_conversation_working_again_gets_no_second_agent_beside_it(self):
+        self.ui.fail_new_once = "Existing draft; leaving it untouched"
+        with self.assertRaisesRegex(RuntimeError, "Existing draft"):
+            self.engine.step(self.KEY, self.session, self.observed(), self.now)
+        self.flow.step(self.KEY, self.session, self.observed(busy=True), self.now + dt.timedelta(minutes=1),
+                       self.pane, False)
+        self.assertEqual(len(self.new_chats()), 1)              # only the attempt that met the draft
+        self.assertEqual(self.state().phase, "attention")
+
+    def test_both_languages_have_the_wrap_up_handover_log(self):
+        for key in ("log_handover_from_wrapup", "log_handover_wrapup_missing", "wrapup_no_summary",
+                    "wrapup_too_old", "wrapup_no_folder", "wrapup_not_saved", "log_handover_wrapup_done",
+                    "handover_wrapup_busy"):
+            self.assertNotEqual(app.tr("en", key), key, key)
+            self.assertNotEqual(app.tr("pl", key), app.tr("en", key), key)
 
 
 class AdapterTests(unittest.TestCase):

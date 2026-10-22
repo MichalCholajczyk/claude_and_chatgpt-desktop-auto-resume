@@ -100,7 +100,7 @@ def claude_windows():
     log(ui, 94, "log_paused", "warn", why=ui.worker.text("pause_user"))
     log(ui, 93, "log_pause_over")
     log(ui, 37, "log_chat_action", chat="Refactor the billing module",
-        action=ui.worker.text("waiting_limit_at", reset=f"{reset:%H:%M}", send=f"{send:%H:%M:%S}"))
+        action=ui.worker.text("waiting_wrapup_at", reset=f"{reset:%H:%M}", send=f"{send:%H:%M:%S}"))
     armed(ui, reset, send, NOW - dt.timedelta(minutes=37))
     fit(ui)
     capture(ui, "screenshot.png")

@@ -36,8 +36,8 @@ import time
 from chatgpt_limits import blocked_until, is_notice, notice_reset, summarize
 from codex_log import CodexLog
 from input_lock import input_lock, worker_cancelled
-from handover import HandoverRefused
-from session_automation import ClaudeUI, Pane, SessionEngine, key_for
+from handover import HandoverRefused, git_branch
+from session_automation import ClaudeUI, Pane, SessionEngine, item_label, key_for
 from strings import Text
 
 MODE_TRIGGER = re.compile(r"^(?:Switch mode, current mode|Zmień tryb, bieżący tryb):\s*(?P<mode>.+?)\s*$", re.I)
@@ -82,6 +82,7 @@ INTERACTIVE = {"ButtonControl", "HyperlinkControl", "MenuItemControl", "CheckBox
                "RadioButtonControl", "TabItemControl", "ComboBoxControl"}
 MAX_NOTICE_CHARS = 400      # the notices are one or two sentences; prose is longer
 HEADER_BAND = 90            # px below the top of the main area that belong to its header
+APP_TITLES = {"chatgpt", "codex", "new chat", "nowy czat"}   # pages that are no conversation
 USAGE_CHECK_S = 600         # default spacing of the "Usage remaining" check while watching
 USAGE_FRESH_S = 60          # a menu reading this recent is reused instead of opening it again
 
@@ -136,15 +137,48 @@ def discover(root):
     panes = []
     main = [n for n in nodes if n.role == "main"]
     title = document_title(nodes)
-    if len(main) == 1 and title:
+    # Without a conversation the page is named after the app or the screen, and the top
+    # bar may say the same: that is no conversation.
+    if len(main) == 1 and title and title.casefold() not in APP_TITLES:
         area = main[0]
-        # The chat's own title button sits in the header band at the top of the main area.
-        headers = [n for n in area.walk() if n.type == "ButtonControl" and n.name.strip() == title
-                   and n.visible and n.rect[1] < area.rect[1] + HEADER_BAND]
+        # The chat's own title sits in the header band at the top of the main area: a
+        # button there until the October update, a text in the window's top bar beside the
+        # main area since (14.10). A sidebar row with the same name never counts.
+        headers = [n for n in nodes if n.type in ("ButtonControl", "TextControl") and n.name.strip() == title
+                   and n.visible and n.rect[1] < area.rect[1] + HEADER_BAND
+                   and not any(a.role in ("navigation", "complementary") for a in n.ancestors())]
         composers = [n for n in area.walk() if n.type == "EditControl" and n.visible and composer_box(n)]
         if headers and len(composers) == 1:
             panes.append(Pane(key_for(kind, title), title, kind, area, composers[0]))
     return panes, entries
+
+
+# The composer's own buttons around the model button (14.10, English labels guessed).
+PERMISSIONS = {"zmień uprawnienia", "change permissions"}
+COMPOSER_TOOLS = (CONTEXT_BUTTON | PERMISSIONS | SUBMIT | {"przejrzyj hooki", "review hooks", "dyktuj", "dictate"})
+WHERE = {"wybierz, gdzie uruchomić czat", "choose where to run the chat", "choose where to run chat"}
+LOCAL = {"lokalny", "local"}
+BRANCH = {"przełącz gałąź", "switch branch"}
+CHOOSE_MODEL = ("wybierz model", "choose model", "select model")
+
+
+def item_texts(node):
+    """All texts of a list item ("tnw endorfina", "aplikacja fitness"), else its name."""
+    texts = [n.name.strip() for n in node.walk() if n.type == "TextControl" and n.name.strip()]
+    return texts or [node.name.strip()]
+
+
+def gpt_settings(pane):
+    """Model and permissions as ChatGPT's composer shows them (14.10): the permissions on
+    "Zmień uprawnienia" ("Pełny dostęp" as its text), the model and its effort as one
+    button, "6 Luna Wysoki" — the only button of the composer that is not one of its
+    tools. The effort cannot be told apart from the model, so it stays in "model"."""
+    box = composer_box(pane.prompt)
+    buttons = [n for n in (box.walk() if box else ()) if n.type == "ButtonControl" and n.name.strip()]
+    permission = next((b for b in buttons if b.name.strip().casefold() in PERMISSIONS), None)
+    texts = [n.name.strip() for n in (permission.walk() if permission else ()) if n.type == "TextControl" and n.name.strip()]
+    models = [b for b in buttons if b.name.strip().casefold() not in COMPOSER_TOOLS]
+    return dict(model=models[0].name.strip() if len(models) == 1 else "", effort="", mode=texts[0] if texts else "")
 
 
 # -------------------------------------------------------------------- signals
@@ -398,7 +432,10 @@ class ChatGPTUI(ClaudeUI):
         return (match["project"].strip() if match else "")
 
     def new_chat(self, key, project_root, message):
-        """Start a conversation in the same project as `key` and send it `message`."""
+        """Start a conversation in the same project as `key` and send it `message`: in the
+        same folder, on this computer, on the folder's branch, with the old conversation's
+        permissions and model (14.10). A wrong folder, place or branch stops it; a
+        permission or model that cannot be set is only reported (`last_settings`)."""
         wanted = os.path.basename(os.path.normpath(project_root or "")).casefold()
         if not wanted:
             raise HandoverRefused("The handover names no project folder")
@@ -407,29 +444,120 @@ class ChatGPTUI(ClaudeUI):
             raise HandoverRefused("The conversation the handover came from is missing")
         if self.value(pane.prompt):
             raise RuntimeError("Existing draft; leaving it untouched")
+        settings = gpt_settings(pane)                 # how the old conversation works
         root = self.snapshot()
         before = {p.key for p in self.panes(root)}
-        buttons = [n for n in root.walk() if n.type == "ButtonControl" and n.visible
-                   and n.name.strip().casefold() in NEW_CHAT_LABELS]
-        if len(buttons) != 1:
+        # Since 14.10 a project in the sidebar has a small "Nowy czat" of its own.
+        button = self.one_new_button([n for n in root.walk() if n.type == "ButtonControl" and n.visible
+                                      and n.name.strip().casefold() in NEW_CHAT_LABELS])
+        if button is None:
             raise HandoverRefused("Cannot tell which button starts a new conversation")
-        self.click(buttons[0])
+        self.click(button)
         prompt, project = None, None
         for _ in range(6):
             time.sleep(0.5)
-            prompt, project = self.new_session_screen(self.snapshot())
+            try:
+                prompt, project = self.new_session_screen(self.snapshot())
+            except RuntimeError:
+                continue
             if prompt is not None and project is not None:
                 break
         if prompt is None or project is None:
             raise HandoverRefused("The new conversation's screen could not be read")
         if self.project_name(project).casefold() != wanted:
-            if not self.pick_project(project, wanted):
+            label = self.pick_project(project, wanted)
+            if not label:
                 raise HandoverRefused("The project of the handover is not on the list")
             prompt, project = self.new_session_screen(self.snapshot())
-            if prompt is None or project is None or self.project_name(project).casefold() != wanted:
+            if prompt is None or project is None or self.project_name(project).casefold() != label.casefold():
                 raise HandoverRefused("The new conversation is not in the project of the handover")
+        if not self.set_on_screen(WHERE, lambda current: current.casefold() in LOCAL, ("Lokalny", "Local")):
+            raise HandoverRefused("The new conversation would not run on this computer")
+        branch = git_branch(project_root)
+        if branch and not self.set_on_screen(BRANCH, lambda current: current == branch, (branch,)):
+            raise HandoverRefused("The new conversation is not on the branch of the handover")
+        missed = []
+        if settings["mode"] and not self.set_on_screen(
+                PERMISSIONS, lambda current: current.casefold() == settings["mode"].casefold(), (settings["mode"],)):
+            missed.append("mode")
+        if settings["model"]:
+            missed += self.set_model(settings["model"])
+        self.last_settings = dict(folder=project_root, branch=branch, **settings, missed=missed)
+        prompt, _ = self.new_session_screen(self.snapshot())
+        if prompt is None:
+            raise HandoverRefused("The new conversation's screen could not be read")
         self.send(Pane("", "", "", root, prompt), message)
         return self.settled_key(before)
+
+    def pick_project(self, button, wanted):
+        """Choose the project of a folder (14.10): the list under the project button names
+        a project, and under it its folder when they differ ("tnw endorfina" / "aplikacja
+        fitness"). Returns the picked project's name, "" when the folder is not listed."""
+        self.click(button)
+        for _ in range(6):
+            time.sleep(0.4)
+            root = self.snapshot()
+            lists = [n for n in root.walk() if n.type in ("MenuControl", "ListControl") or n.role in ("menu", "listbox")]
+            entries = list({id(n): n for found in lists for n in found.walk() if n.visible and n.type in (
+                "ListItemControl", "MenuItemControl", "RadioButtonControl")}.values())
+            items = [n for n in entries if wanted in {t.casefold() for t in item_texts(n)}]
+            if len(items) == 1:
+                label = item_label(items[0])
+                self.click(items[0])
+                time.sleep(0.8)
+                return label
+            if items or entries:
+                break                 # listed, but not once: never guess
+        self.press("{Esc}")
+        return ""
+
+    def screen_button(self, names):
+        """The one button of the new-conversation screen with one of these names."""
+        buttons = [n for n in self.screen_nodes(self.snapshot()) if n.type == "ButtonControl" and n.visible
+                   and n.name.strip().casefold() in names]
+        return buttons[0] if len(buttons) == 1 else None
+
+    def set_on_screen(self, names, good, labels):
+        """Make the button named `names` show what `good` accepts, picking `labels` from
+        its menu when it does not. True once it does."""
+        button = self.screen_button(names)
+        if button is None:
+            return False
+        if good(item_label(button)):
+            return True
+        for label in labels:
+            try:
+                self.choose(button, label)
+            except RuntimeError:
+                return False
+            button = self.screen_button(names)
+            if button is not None and good(item_label(button)):
+                return True
+        return False
+
+    def set_model(self, wanted):
+        """Give the new conversation the model of `wanted` ("5.6 Terra Wysoki") from "Wybierz
+        model". Its effort ("Wysoki") is only compared: it is set on a slider not measured
+        yet, so a different one is reported instead of guessed. Returns what was missed."""
+        def model_button():
+            prompt = self.new_session_screen(self.snapshot())[0]
+            box = composer_box(prompt) if prompt is not None else None
+            buttons = [n for n in (box.walk() if box else ()) if n.type == "ButtonControl"
+                       and n.name.strip() and n.name.strip().casefold() not in COMPOSER_TOOLS]
+            return buttons[0] if len(buttons) == 1 else None
+        button = model_button()
+        if button is None:
+            return ["model"]
+        if button.name.strip() == wanted:
+            return []
+        try:
+            picked = self.choose(button, wanted, submenu=CHOOSE_MODEL, prefix=True)
+        except RuntimeError:
+            picked = False
+        button = model_button()
+        if button is not None and button.name.strip() == wanted:
+            return []
+        return ["effort"] if picked else ["model"]
 
     def confirm_sent(self, key, message):
         """Enter sends by default; with "Ctrl+Enter to send" it only adds a line, so

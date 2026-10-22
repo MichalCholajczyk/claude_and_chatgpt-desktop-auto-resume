@@ -6,7 +6,7 @@ Run:  py test_detection.py
 
 import datetime as dt
 
-from claude_auto_continue import detect_limit_banner, parse_reset_time
+from claude_auto_continue import detect_limit_banner, detect_wrap_up, parse_reset_time
 
 NOW = dt.datetime(2026, 7, 14, 13, 22, 0)
 FAILURES = []
@@ -132,6 +132,24 @@ for text in ("Approaching session limit", "You’ve used 90% of your session lim
              "Usage-limit notices now say which limit you hit and when it resets"):
     phrase, _ = detect_limit_banner([text], now=TUE)
     check(f"not a notice: {text[:40]}", phrase is None, phrase)
+
+# Claude Code's wrap-up allowance (2.1.277+, seen 14.10): the response runs on past the
+# limit to a safe point, then the strip says so instead of "Usage limit reached".
+WRAPPED = ["Wrapped up past your usage limit", "Resets at 2:30 PM", "Learn more", "Upgrade"]
+phrase, reset = detect_limit_banner(WRAPPED, now=TUE)
+check("wrapped-up strip is a limit notice", phrase == "Wrapped up past your usage limit", phrase)
+check("wrapped-up strip gives its reset", reset == dt.datetime(2026, 9, 15, 14, 30), reset)
+check("wrapped-up strip is a wrap-up", detect_wrap_up(WRAPPED))
+for texts in (["Usage limit reached · wrapping up"], ["Usage limit reached", "·", "wrapping up"],
+              ["Usage limit reached - wrapping up", "Resets at 2:30 PM"]):
+    check(f"wrap-up in progress: {texts}",
+          detect_wrap_up(texts) and detect_limit_banner(texts, now=TUE)[0] is not None)
+for texts in (["Usage limit reached", "Resets at 2:40 PM", "Upgrade"],
+              ["Wrapping up the release"], ["Wrapping up the release", "Usage limit reached"],
+              ["Usage limit reached", "Resets at 2:40 PM", "Wrapping up the release"]):
+    check(f"not a wrap-up: {texts}", not detect_wrap_up(texts))
+phrase, _ = detect_limit_banner(["Wrapping up the release"], now=TUE)
+check("a title about wrapping up is no limit", phrase is None, phrase)
 
 print()
 if FAILURES:

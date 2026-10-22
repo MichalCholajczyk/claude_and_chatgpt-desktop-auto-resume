@@ -11,8 +11,11 @@ conversation, so every decision can be tested on plain data.
 """
 from dataclasses import dataclass
 import datetime as dt
+import json
 import os
 import re
+
+from strings import Text
 
 # ------------------------------------------------------------ reading the context
 
@@ -156,6 +159,40 @@ def project_root(path):
     return os.path.dirname(folder) or None
 
 
+def git_branch(folder):
+    """The branch checked out in `folder`, read from git's own files (a worktree's ".git"
+    is a file naming its real directory); None outside a repository or on a detached
+    HEAD. Nothing is run, so no console window flashes."""
+    path = os.path.abspath(folder or ".")
+    while True:
+        dot = os.path.join(path, ".git")
+        if os.path.isdir(dot):
+            head = os.path.join(dot, "HEAD")
+            break
+        if os.path.isfile(dot):
+            try:
+                with open(dot, encoding="utf-8") as f:
+                    line = f.read().strip()
+            except OSError:
+                return None
+            if not line.startswith("gitdir:"):
+                return None
+            gitdir = line[len("gitdir:"):].strip()
+            head = os.path.join(gitdir if os.path.isabs(gitdir) else os.path.join(path, gitdir), "HEAD")
+            break
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+    try:
+        with open(head, encoding="utf-8") as f:
+            ref = f.read().strip()
+    except OSError:
+        return None
+    prefix = "ref: refs/heads/"
+    return ref[len(prefix):] if ref.startswith(prefix) else None
+
+
 # ------------------------------------------------------------- the two messages
 
 def _one_line(*parts):
@@ -172,12 +209,85 @@ def request_message(cfg, t, context_label_text, handover_id):
                              path=HANDOVER_REL.format(id=handover_id), id=handover_id))
 
 
-def continue_message(cfg, t, path, plan_folder):
+def continue_message(cfg, t, path, plan_folder, folder=None, branch=None, wrapup=False):
     """What the fresh conversation is told. The body can be edited in the settings; the
-    tail with the handover's path and the plan folder is always ours."""
-    body = (cfg.get("handover_continue_text") or "").strip() or t("handover_continue_default")
+    tail with the handover's path, where the work goes on and the plan folder is always
+    ours. After a wrap-up the body is built in: a wrap-up's summary is shorter than a
+    handover, so the new agent gets to know the project before it reads it."""
+    if wrapup:
+        body = t("handover_continue_wrapup")
+    else:
+        body = (cfg.get("handover_continue_text") or "").strip() or t("handover_continue_default")
     plan = t("handover_continue_plan", plan=plan_folder) if plan_folder else t("handover_continue_noplan")
-    return _one_line(body, t("handover_continue_tail", path=path), plan)
+    where = (t("handover_continue_where", folder=folder, branch=branch) if folder and branch else
+             t("handover_continue_folder", folder=folder) if folder else "")
+    return _one_line(body, t("handover_continue_tail", path=path), where, plan)
+
+
+WRAPUP_MARK = "<!-- auto-resume wrap-up "
+
+
+def wrapup_mark(title, info):
+    """The file's first line: which wrap-up of which conversation it was made from, so the
+    same wrap-up is never handed over twice, not even by a later run of the program."""
+    return WRAPUP_MARK + json.dumps({"chat": title, "at": info["at"].isoformat()}, ensure_ascii=False) + " -->"
+
+
+def handed_over_before(folder, title, info):
+    """The handover file this very wrap-up was already turned into, or None."""
+    mark = wrapup_mark(title, info)
+    folder = os.path.join(folder, HANDOVER_DIR)
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return None
+    for name in names:
+        if not (name.startswith("HANDOVER-") and name.endswith(".md")):
+            continue
+        path = os.path.join(folder, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                if f.readline().rstrip("\n") == mark:
+                    return path
+        except (OSError, UnicodeDecodeError):
+            continue
+    return None
+
+
+def wrapup_file_text(t, title, info, reset):
+    """The handover a wrap-up leaves behind: where the work was, then the previous agent's
+    own summary, word for word. `info` is QuotaLog.wrap_up_for's dict."""
+    lines = [
+        wrapup_mark(title, info),
+        t("handover_wrapup_file_title"), "",
+        "- " + t("handover_wrapup_file_chat", chat=title),
+        "- " + t("handover_wrapup_file_folder", folder=info["folder"]),
+        "- " + t("handover_wrapup_file_branch", branch=info["branch"] or "—"),
+        "- " + t("handover_wrapup_file_at", at=f"{info['at']:%Y-%m-%d %H:%M}"),
+        "- " + t("handover_wrapup_file_reset", reset=f"{reset:%Y-%m-%d %H:%M}" if reset else "—"),
+        "", t("handover_wrapup_file_note"), "", "---", "",
+        info["summary"].strip(), ""]
+    return "\n".join(lines)
+
+
+def write_wrapup_file(folder, handover_id, text):
+    """Save the handover where a handover is expected and return its path. It is written
+    aside and then moved into place, so no half-written file is ever read, and nothing is
+    left behind when either step fails. The text goes in as it is, line breaks too."""
+    path = os.path.join(folder, HANDOVER_REL.format(id=handover_id).replace("/", os.sep))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    aside = path + ".part"
+    try:
+        with open(aside, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        os.replace(aside, path)
+    except Exception:
+        try:
+            os.remove(aside)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 # ---------------------------------------------------------------- the flow
@@ -188,6 +298,7 @@ MAX_REMINDERS = 1
 WORKING_PHASES = ("stopping", "requested", "reminded", "ready")
 # phases the scheduler owns: the handover only waits then, and its clock stops
 BLOCKED_PHASES = ("waiting", "verifying", "question", "exhausted")
+LIMIT_WINDOW = dt.timedelta(hours=5)    # a wrap-up belongs to the five-hour window it ended
 
 
 class HandoverRefused(RuntimeError):
@@ -208,6 +319,8 @@ class HandoverState:
     new_key: str = ""
     context: str = ""
     last_seen: object = None
+    wrapup: bool = False       # built from a wrap-up's own summary: the new agent is told so
+    missing: str = ""          # why the wrap-up could not be used, as last logged
 
 
 class HandoverFlow:
@@ -280,6 +393,94 @@ class HandoverFlow:
         state.id, state.pending = state.pending, ""
         self._requested(key, state, now)
 
+    # ------------------------------------------- the limit path, after a wrap-up
+    def from_wrap_up(self, key, session, observed, now):
+        """After a wrap-up with the context over the threshold, hand the work over from the
+        summary Claude wrote when the limit ran out (the conversation's log), without a word
+        to the old conversation: after the five-hour wait its prompt cache is gone, and one
+        more message would read the whole context again.
+
+        True when this took the conversation over: a new one is open or the flow needs
+        attention (an error of the adapter propagates; the flow retries from "ready" on
+        the next scan). False when nothing was done and the usual request should go out.
+        """
+        if not self.due(key, dict(observed, limit=False)):
+            return False
+        info = self._wrap_up_info(key, session)
+        if isinstance(info, str):
+            self._no_wrap_up(key, info)
+            return False
+        earlier = handed_over_before(info["folder"], chat_name(key), info)
+        if earlier:
+            # This wrap-up was handed over before (by an earlier run, or before Stop): never
+            # twice, and the old conversation is not resumed either.
+            state = self.state_for(key)
+            state.path, state.wrapup, state.phase = earlier, True, "handed"
+            session.phase = "handed"
+            self.engine.note(key, session, "handed")
+            self.engine.worker.log("log_handover_wrapup_done", chat=chat_name(key), path=earlier)
+            return True
+        handover_id = new_id(now)
+        try:
+            path = write_wrapup_file(info["folder"], handover_id,
+                                     wrapup_file_text(self.t, chat_name(key), info, session.reset))
+        except Exception:          # not only the disk: a summary may not encode either
+            self._no_wrap_up(key, "wrapup_not_saved")
+            return False
+        state = self.state_for(key)
+        state.context = context_label(observed.get("context"))
+        self.engine.worker.log("log_handover_from_wrapup", chat=chat_name(key), context=state.context)
+        self.engine.worker.log("log_handover_file", chat=chat_name(key), path=path)
+        state.id, state.path, state.wrapup, state.phase = handover_id, path, True, "ready"
+        state.started = state.last_seen = now
+        state.work_s = 0.0
+        session.phase = "handover_new"      # the scheduler leaves this conversation alone now
+        self._open_new(key, session, state, now)
+        return True
+
+    def _wrap_up_info(self, key, session):
+        """This limit's wrap-up from the conversation's log, or why there is none (a key)."""
+        try:
+            info = self.engine.quota.wrap_up_for(chat_name(key))
+        except Exception:          # an unreadable log must never stop the watch
+            info = None
+        if not info:
+            return "wrapup_no_summary"
+        if session.reset:
+            # A reset more than five hours after the limit was first seen is not the five-hour
+            # limit's (a weekly one): its wrap-up counts from that first sighting.
+            longer = session.since is not None and session.reset - session.since > LIMIT_WINDOW
+            current = info["at"] <= session.reset and (
+                session.reset - LIMIT_WINDOW < info["at"]
+                or longer and session.since - LIMIT_WINDOW < info["at"])
+        else:
+            # Unknown reset: the wait can last the whole window, so count from the first sighting.
+            current = session.since is not None and info["at"] > session.since - LIMIT_WINDOW
+        if not current:
+            return "wrapup_too_old"
+        if not info["folder"] or not os.path.isdir(info["folder"]):
+            return "wrapup_no_folder"
+        return info
+
+    def holds(self, key, session):
+        """True when a handover owns this conversation past asking for one: it is opening the
+        new conversation, has handed the work over, or waits for a person. The scheduler then
+        sends it nothing, and its status follows the handover's."""
+        phase = self.state_for(key).phase
+        if phase not in ("ready", "handed", "attention"):
+            return False
+        session.phase = {"ready": "handover_new", "handed": "handed", "attention": "exhausted"}[phase]
+        return True
+
+    def _no_wrap_up(self, key, why):
+        """Log why the wrap-up could not be used, once: a resume tried again finds the same."""
+        state = self.state_for(key)
+        if state.missing == why:
+            return
+        state.missing = why
+        self.engine.worker.log("log_handover_wrapup_missing", "warn", chat=chat_name(key),
+                               why=self.engine.worker.text(why))
+
     # ------------------------------------------------------------- the steps
     def step(self, key, session, observed, now, pane, blocked):
         """Called once per scan of this conversation, with the input lock held."""
@@ -301,6 +502,11 @@ class HandoverFlow:
         elif state.phase in ("requested", "reminded"):
             self._waiting(key, session, state, observed, now, pane)
         if state.phase == "ready":
+            if state.wrapup and observed.get("busy"):
+                # The old conversation works again (its draft was sent, or someone resumed it):
+                # a second agent beside it is the person's call, not ours.
+                self._attention(key, session, state, "handover_wrapup_busy")
+                return
             self._open_new(key, session, state, now)
 
     def _clock(self, state, now, blocked):
@@ -377,7 +583,8 @@ class HandoverFlow:
             self._attention(key, session, state, "handover_no_project")
             return
         session.phase = "handover_new"
-        message = continue_message(self.cfg, self.t, state.path, self.cfg.get("plan_folder"))
+        message = continue_message(self.cfg, self.t, state.path, self.cfg.get("plan_folder"),
+                                   root, git_branch(root), wrapup=state.wrapup)
         try:
             new_key = self.engine.ui.new_chat(key, root, message)
         except HandoverRefused as refused:
@@ -389,6 +596,20 @@ class HandoverFlow:
         self.engine.note(key, session, "handed")
         self.engine.worker.log("log_handover_new_chat", chat=chat_name(key),
                                title=chat_name(new_key) if new_key else "—")
+        self._log_settings(key, getattr(self.engine.ui, "last_settings", None))
+
+    def _log_settings(self, key, settings):
+        """Where and how the new conversation works, and what it could not be given."""
+        if not settings:
+            return
+        shown = [os.path.basename(os.path.normpath(settings.get("folder") or "")), settings.get("branch"),
+                 settings.get("model"), settings.get("effort"), settings.get("mode")]
+        self.engine.worker.log("log_handover_settings", chat=chat_name(key),
+                               settings=" · ".join(part for part in shown if part))
+        if settings.get("missed"):
+            self.engine.worker.log("log_handover_missed", "warn", chat=chat_name(key),
+                                   missed=Text.joined(", ", [self.engine.worker.text("setting_" + part)
+                                                             for part in settings["missed"]]))
 
     def _follow(self, key, new_key, now):
         """Watch the new conversation instead of the old one, and check that it started."""

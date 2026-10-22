@@ -279,6 +279,7 @@ class ChatGPTApp(app.App):
     # No "Try again" button after a limit in ChatGPT, and Codex's own questions skip
     # themselves after a countdown: only the API/server retry option applies.
     FEATURES = ("retry_api_errors", "pause_on_foreign_input", "handover_enabled")
+    WRAPUP_MESSAGE = False       # Codex has no wrap-up allowance
 
     def _load_config(self):
         cfg = app.load_config(CONFIG_PATH, DEFAULT_CONFIG)

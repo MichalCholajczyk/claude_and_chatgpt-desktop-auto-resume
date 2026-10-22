@@ -548,6 +548,190 @@ STRINGS["pl"].update({
         "ścieżki program dodaje sam: zmieniasz tylko treść."),
 })
 
+# --- a conversation that wrapped up at the limit (Claude Code 2.1.277+) ---------
+STRINGS["en"].update({
+    "lbl_wrapup_message": "Message after a wrap-up:",
+    "wrapup_message_help": (
+        "Since version 2.1.277, Claude Code can finish its work by itself when the usage limit "
+        "runs out in the middle of a response (the “wrap-up allowance”): it stops at a safe "
+        "point, writes what is done and what is left, and the strip under the conversation "
+        "says “Wrapped up past your usage limit”.\n\n"
+        "After the reset such a conversation gets this message instead of the one above. "
+        "Conversations the limit cut off abruptly still get the message above. Leave it blank "
+        "for the built-in text."),
+    "waiting_wrapup_at": "Wrap-up at the limit — resets {reset}, next attempt {send}",
+    "wrapup_message": "Sent the wrap-up message",
+})
+STRINGS["pl"].update({
+    "lbl_wrapup_message": "Tekst po wrap-upie:",
+    "wrapup_message_help": (
+        "Od wersji 2.1.277 Claude Code potrafi sam dokończyć pracę, gdy limit użycia skończy się "
+        "w trakcie odpowiedzi („wrap-up allowance”): zatrzymuje się w bezpiecznym miejscu, pisze, "
+        "co zrobione, a co zostało, a pasek pod rozmową mówi „Wrapped up past your usage limit”.\n\n"
+        "Po resecie taka rozmowa dostaje ten tekst zamiast tego powyżej. Rozmowy, które limit "
+        "przerwał nagle, nadal dostają tekst powyżej. Puste pole oznacza tekst wbudowany."),
+    "waiting_wrapup_at": "Wrap-up przy limicie — reset {reset}, wysyłka o {send}",
+    "wrapup_message": "Wysłano tekst po wrap-upie",
+})
+
+# --- the new conversation of a handover keeps the old one's folder and settings ----
+STRINGS["en"].update({
+    "handover_continue_where": "You are working in {folder}, on branch {branch}.",
+    "handover_continue_folder": "You are working in {folder}.",
+    "log_handover_settings": "{chat}: the new conversation is set up — {settings}.",
+    "log_handover_missed": "{chat}: could not set {missed} in the new conversation; the app's default is used.",
+    "setting_model": "the model", "setting_effort": "the effort", "setting_mode": "the permission mode",
+})
+STRINGS["pl"].update({
+    "handover_continue_where": "Pracujesz w {folder}, na gałęzi {branch}.",
+    "handover_continue_folder": "Pracujesz w {folder}.",
+    "log_handover_settings": "{chat}: nowa rozmowa ustawiona — {settings}.",
+    "log_handover_missed": "{chat}: w nowej rozmowie nie udało się ustawić: {missed}; zostaje domyślne ustawienie aplikacji.",
+    "setting_model": "model", "setting_effort": "effort", "setting_mode": "tryb uprawnień",
+})
+
+# --- the box a turn ends with and the cards about a new session (16.10) -------------
+STRINGS["en"].update({
+    "auto_next_step": "Accept the next step automatically",
+    "auto_next_step_help": (
+        "When Claude ends a turn by asking how to go on — a short summary, one question and one "
+        "or two buttons under it, e.g. “Do you approve this direction?” with “Yes, go ahead” — "
+        "the program clicks the main button for you. The main one is the button Claude "
+        "highlights and gives the Ctrl+Enter shortcut; its label is Claude’s own words, in any "
+        "language.\n\n"
+        "It never clicks the app’s own actions there (Commit, Create PR, Merge, Archive and the "
+        "like) — those stay with you — and it waits while the conversation works, is stopped by "
+        "a limit or an error, or holds a draft of yours. Works only in the conversations you "
+        "watch and with “Send automatically” on. Each click is written to the log."),
+    "auto_sessions": "Answer suggested new sessions automatically",
+    "auto_sessions_help": (
+        "Claude sometimes ends with a card about a new session: it suggests extra work by "
+        "itself (“New session” — Start / Do it here), or it asks whether to do a task you gave "
+        "it here or in a session of its own (“Start this in its own session?” — New session / "
+        "Do it here) and waits for the answer. The program answers the way you choose next to "
+        "this option:\n"
+        "• Start — clicks Start or New session: the work goes on in a new session, which the "
+        "program starts watching too (from then on it watches the checked conversations, the "
+        "new one among them);\n"
+        "• Do it here — the work stays in the same conversation.\n\n"
+        "A session started from a watched conversation in any other way — you clicked Start "
+        "yourself, or Claude started it on its own — is watched too, even with this option off: "
+        "a new one as soon as it shows up in the sidebar, and one that was there before watching "
+        "began if it still runs or waits for an answer.\n\n"
+        "So that a night does not turn into an avalanche of sessions, it starts at most 5 new "
+        "sessions per run of watching; after that the cards wait for you. Works only in the "
+        "conversations you watch and with “Send automatically” on. Each click is written to "
+        "the log."),
+    "next_step_pressed": "Clicked the next step — {label}",
+    "next_step_left": "Next step left for you — {label}",
+    "offer_start": "Started a new session — {title}",
+    "offer_here": "Clicked Do it here — {title}",
+    "offer_left": "New session left for you (limit of 5 reached) — {title}",
+    "log_started_watched": "{chat}: also watching the new session “{new}”",
+    "log_started_unseen": ("{chat}: the new session “{title}” has not shown up in the sidebar yet — "
+                           "it will be watched as soon as it does"),
+    "log_watch_checked": "{chat}: now watching the checked conversations ({count}) and visiting them from the sidebar",
+})
+STRINGS["pl"].update({
+    "auto_next_step": "Automatycznie akceptuj następny krok",
+    "auto_next_step_help": (
+        "Gdy Claude kończy turę pytaniem, jak iść dalej — krótkie podsumowanie, jedno pytanie i "
+        "jeden lub dwa przyciski pod nim, np. „Zatwierdzasz ten kierunek?” z „Tak, działaj” — "
+        "program klika za Ciebie główny przycisk. Główny to ten, który Claude wyróżnia i "
+        "opisuje skrótem Ctrl+Enter; jego napis pisze Claude, w dowolnym języku.\n\n"
+        "Nigdy nie klika tam akcji samej aplikacji (Commit, Create PR, Merge, Archive i "
+        "podobnych) — te zostają dla Ciebie — i czeka, gdy rozmowa pracuje, stoi na limicie albo "
+        "błędzie lub masz w niej szkic. Działa tylko w pilnowanych rozmowach i z włączonym "
+        "„Wysyłaj automatycznie”. Każde kliknięcie trafia do dziennika."),
+    "auto_sessions": "Automatycznie odpowiadaj na propozycje nowych sesji",
+    "auto_sessions_help": (
+        "Claude czasem kończy kartą o nowej sesji: sam proponuje dodatkową pracę („New "
+        "session” — Start / Do it here) albo pyta, czy zadanie, o które prosiłeś, zrobić tutaj, "
+        "czy w osobnej sesji („Start this in its own session?” — New session / Do it here), i "
+        "czeka na odpowiedź. Program odpowiada tak, jak wybierzesz obok tej opcji:\n"
+        "• Start — klika Start albo New session: praca idzie dalej w nowej sesji, którą program "
+        "też zaczyna pilnować (od tej chwili pilnuje zaznaczonych rozmów, wśród nich nowej);\n"
+        "• Do it here — praca zostaje w tej samej rozmowie.\n\n"
+        "Sesję uruchomioną z pilnowanej rozmowy w inny sposób — sam kliknąłeś Start albo Claude "
+        "uruchomił ją sam — program też zaczyna pilnować, nawet przy wyłączonej tej opcji: nową, "
+        "gdy tylko pojawi się w pasku bocznym, a tę sprzed rozpoczęcia pilnowania, jeśli jeszcze "
+        "pracuje albo czeka na odpowiedź.\n\n"
+        "Żeby noc nie zamieniła się w lawinę sesji, program uruchamia najwyżej 5 nowych sesji "
+        "na jedno uruchomienie pilnowania; potem karty czekają na Ciebie. Działa tylko w "
+        "pilnowanych rozmowach i z włączonym „Wysyłaj automatycznie”. Każde kliknięcie trafia "
+        "do dziennika."),
+    "next_step_pressed": "Kliknięto następny krok — {label}",
+    "next_step_left": "Następny krok czeka na Ciebie — {label}",
+    "offer_start": "Uruchomiono nową sesję — {title}",
+    "offer_here": "Kliknięto Do it here — {title}",
+    "offer_left": "Nowa sesja czeka na Ciebie (limit 5 wyczerpany) — {title}",
+    "log_started_watched": "{chat}: obserwuję też nową sesję „{new}”",
+    "log_started_unseen": ("{chat}: nowa sesja „{title}” jeszcze nie pojawiła się w pasku bocznym — "
+                           "zacznę ją obserwować, gdy tylko się pojawi"),
+    "log_watch_checked": "{chat}: od teraz pilnuję zaznaczonych rozmów ({count}) i przechodzę do nich przez pasek boczny",
+})
+
+# --- the work handed over from a wrap-up's own summary (15.10) -----------------------
+STRINGS["en"].update({
+    "handover_continue_wrapup": (
+        "[Auto-Resume] You are taking over from another agent whose usage limit ran out: it "
+        "stopped at a safe point and listed what was done and what was left. First get to know "
+        "the project with the graphify skill - if graphify-out/ already exists, update it "
+        "instead of building it from scratch - and check the state of the work yourself (git "
+        "status, the latest changes). Then read its summary and carry on with what was left."),
+    "handover_wrapup_file_title": "# Handover from a wrap-up (Auto-Resume)",
+    "handover_wrapup_file_chat": "Previous conversation: {chat}",
+    "handover_wrapup_file_folder": "Working folder: {folder}",
+    "handover_wrapup_file_branch": "Branch: {branch}",
+    "handover_wrapup_file_at": "Wrapped up: {at}",
+    "handover_wrapup_file_reset": "The limit reset at: {reset}",
+    "handover_wrapup_file_note": (
+        "Below, word for word, is the summary the previous agent wrote when its usage limit "
+        "ran out: what was done and what was left. It was written before the reset; check the "
+        "state of the work yourself."),
+    "log_handover_from_wrapup": (
+        "{chat}: wrapped up at the limit with the context at {context} — handing the work "
+        "over from its summary."),
+    "log_handover_wrapup_missing": (
+        "{chat}: cannot hand the work over from the wrap-up ({why}); asking the conversation "
+        "for a handover."),
+    "wrapup_no_summary": "its log has no wrap-up summary",
+    "wrapup_too_old": "the wrap-up in its log belongs to an earlier limit",
+    "wrapup_no_folder": "the folder named in its log is gone",
+    "wrapup_not_saved": "the handover file could not be saved",
+    "log_handover_wrapup_done": "{chat}: its wrap-up was already handed over ({path}); the conversation is left alone.",
+    "handover_wrapup_busy": "Handover from the wrap-up stopped: the conversation is working again",
+})
+STRINGS["pl"].update({
+    "handover_continue_wrapup": (
+        "[Auto-Resume] Przejmujesz pracę po agencie, któremu skończył się limit użycia: "
+        "zatrzymał się w bezpiecznym miejscu i spisał, co zrobione, a co zostało. Najpierw "
+        "poznaj projekt skillem graphify - jeśli graphify-out/ już istnieje, zaktualizuj go, nie "
+        "buduj od zera - i sam sprawdź stan pracy (git status, ostatnie zmiany). Potem przeczytaj "
+        "jego podsumowanie i kontynuuj to, co zostało."),
+    "handover_wrapup_file_title": "# Handover z wrap-upu (Auto-Resume)",
+    "handover_wrapup_file_chat": "Poprzednia rozmowa: {chat}",
+    "handover_wrapup_file_folder": "Folder roboczy: {folder}",
+    "handover_wrapup_file_branch": "Gałąź: {branch}",
+    "handover_wrapup_file_at": "Wrap-up: {at}",
+    "handover_wrapup_file_reset": "Limit zresetował się: {reset}",
+    "handover_wrapup_file_note": (
+        "Poniżej dosłownie podsumowanie, które poprzedni agent napisał, gdy skończył mu się "
+        "limit użycia: co zrobione, a co zostało. Powstało przed resetem; stan pracy sprawdź "
+        "sam."),
+    "log_handover_from_wrapup": (
+        "{chat}: wrap-up przy limicie, kontekst {context} — przekazuję pracę na podstawie "
+        "podsumowania."),
+    "log_handover_wrapup_missing": (
+        "{chat}: nie da się przekazać pracy z wrap-upu ({why}); proszę rozmowę o handover."),
+    "wrapup_no_summary": "w jej logu nie ma podsumowania wrap-upu",
+    "wrapup_too_old": "wrap-up w jej logu dotyczy wcześniejszego limitu",
+    "wrapup_no_folder": "folderu z jej logu nie ma na dysku",
+    "wrapup_not_saved": "nie udało się zapisać pliku handoveru",
+    "log_handover_wrapup_done": "{chat}: jej wrap-up już przekazano ({path}); rozmowa zostaje w spokoju.",
+    "handover_wrapup_busy": "Handover z wrap-upu wstrzymany: rozmowa znów pracuje",
+})
+
 # --- the log -------------------------------------------------------------------
 # Every line of the log is this template, so a line can be shown again in the other language.
 STRINGS["en"]["log_line"] = STRINGS["pl"]["log_line"] = "[{stamp}] {msg}"
@@ -586,6 +770,8 @@ ERRORS_PL = {
     "The new conversation's screen could not be read": "Nie da się odczytać ekranu nowej rozmowy",
     "The project of the handover is not on the list": "Projektu z handoveru nie ma na liście",
     "The new conversation is not in the project of the handover": "Nowa rozmowa nie jest w projekcie z handoveru",
+    "The new conversation would not run on this computer": "Nowa rozmowa nie działałaby na tym komputerze",
+    "The new conversation is not on the branch of the handover": "Nowa rozmowa nie jest na gałęzi z handoveru",
     "Question already has a draft answer": "Pytanie ma już wpisaną odpowiedź",
     "Cannot verify question selection state": "Nie da się sprawdzić, co zaznaczono w pytaniu",
     "Question already has a selected answer": "W pytaniu zaznaczono już odpowiedź",
@@ -593,6 +779,7 @@ ERRORS_PL = {
     "No recommended option or Other field": "Brak rekomendowanej odpowiedzi i pola „Other”",
     "Answer click was not accepted": "Kliknięcie odpowiedzi nie zadziałało",
     "Permission click was not accepted": "Kliknięcie zgody nie zadziałało",
+    "Card click was not accepted": "Kliknięcie karty nie zadziałało",
     "ChatGPT did not accept the message (the limit may still be on); it was removed from the composer":
         "ChatGPT nie przyjął wiadomości (limit może nadal trwać) — usunięto ją z pola",
     "ChatGPT did not accept the message (the limit may still be on); it is left in the composer":
