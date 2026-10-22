@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -107,6 +108,60 @@ class WindowTests(unittest.TestCase):
         self.window = launcher.Launcher()
         self.window.withdraw()
         self.addCleanup(lambda: self.window.winfo_exists() and self.window.destroy())
+
+    def settle(self):
+        """Show the window as Main.bat does (a hidden one gets no focus or mouse events) and
+        let the start-up callbacks run; the first fires after 50 ms."""
+        self.window.attributes("-alpha", 0.0)
+        self.window.deiconify()
+        self.window.update()
+        time.sleep(0.1)
+        self.window.update()
+
+    def lit(self):
+        """The tiles that look picked: an amber ring. Tk draws highlightcolor while a tile
+        holds the keyboard focus, highlightbackground otherwise."""
+        focus = self.window.focus_lastfor()
+        return [i for i, e in enumerate(self.window.tiles)
+                if e["frame"].cget("highlightcolor" if e["frame"] is focus else "highlightbackground")
+                == launcher.THEME["amber"]]
+
+    def test_no_tile_looks_picked_when_the_picker_opens(self):
+        """22.10: ChatGPT, the first tile, opened with the keyboard focus and so stayed lit
+        wherever the mouse went."""
+        self.settle()
+        self.assertEqual(self.lit(), [])
+
+    def test_the_mouse_lights_only_the_tile_under_it(self):
+        self.settle()
+        title = self.window.tiles[1]["title"]
+        title.event_generate("<Enter>")
+        self.assertEqual(self.lit(), [1])
+        title.event_generate("<Leave>")
+        self.assertEqual(self.lit(), [])
+
+    def test_arrow_keys_and_the_mouse_share_one_light(self):
+        self.settle()
+        self.window.event_generate("<Right>")                 # from none: the first tile
+        self.assertEqual(self.lit(), [0])
+        self.window.event_generate("<Right>")
+        self.assertEqual(self.lit(), [1])
+        self.window.tiles[2]["title"].event_generate("<Enter>")
+        self.assertEqual(self.lit(), [2])                     # never two tiles at once
+        self.window.tiles[2]["title"].event_generate("<Leave>")
+        self.window.event_generate("<Left>")                  # from none going left: the last
+        self.assertEqual(self.lit(), [2])
+
+    def test_enter_starts_the_lit_tile(self):
+        self.settle()
+        with patch.object(launcher, "launch_tile") as start, patch.object(launcher, "arrange_apps", return_value=False), \
+                patch.object(launcher, "show_apps", return_value=[]):
+            self.window.event_generate("<Return>")            # nothing lit: nothing starts
+            start.assert_not_called()
+            self.window.event_generate("<Right>")
+            self.window.event_generate("<Right>")
+            self.window.event_generate("<Return>")
+        start.assert_called_once_with(launcher.TILES[1])
 
     def test_three_tiles_with_pictures(self):
         self.assertEqual(len(self.window.tiles), 3)

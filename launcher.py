@@ -281,6 +281,7 @@ class Launcher(tk.Tk):
             else "Segoe UI"
         self.images = {}
         self.tiles = []
+        self.lit = None                 # the tile that looks picked, under the mouse or chosen by arrow keys
         self.busy = False
         self._build()
         self._dark_titlebar()
@@ -288,9 +289,14 @@ class Launcher(tk.Tk):
         self.bind("<Escape>", lambda _e: self.destroy())
         for number, _ in enumerate(TILES, start=1):
             self.bind(str(number), lambda _e, i=number - 1: self._activate(i))
-        self.bind("<Left>", lambda _e: self._move_focus(-1))
-        self.bind("<Right>", lambda _e: self._move_focus(1))
-        self.after(50, lambda: self.tiles[0]["frame"].focus_set())
+        self.bind("<Left>", lambda _e: self._step(-1))
+        self.bind("<Right>", lambda _e: self._step(1))
+        self.bind("<Tab>", lambda _e: self._step(1))
+        self.bind("<Shift-Tab>", lambda _e: self._step(-1))
+        self.bind("<Return>", lambda _e: self._activate_lit())
+        self.bind("<space>", lambda _e: self._activate_lit())
+        # The keys go to the window itself: a focused tile would stay lit wherever the mouse went.
+        self.after(50, self.focus_set)
 
     def px(self, value):
         return int(value * self.scale)
@@ -315,8 +321,8 @@ class Launcher(tk.Tk):
     def _tile(self, parent, index, tile):
         t = THEME
         width, height = self.px(290), self.px(330)
-        frame = tk.Frame(parent, width=width, height=height, bg=t["panel"], cursor="hand2", takefocus=1,
-                         highlightthickness=2, highlightbackground=t["border"], highlightcolor=t["amber"])
+        frame = tk.Frame(parent, width=width, height=height, bg=t["panel"], cursor="hand2",
+                         highlightthickness=2, highlightbackground=t["border"], highlightcolor=t["border"])
         frame.grid_propagate(False)
         frame.pack_propagate(False)
         inner = tk.Frame(frame, bg=t["panel"])
@@ -334,13 +340,9 @@ class Launcher(tk.Tk):
         entry = dict(frame=frame, parts=parts, title=title, subtitle=subtitle, tile=tile)
         self.tiles.append(entry)
         for widget in parts:
-            widget.bind("<Enter>", lambda _e, e=entry: self._hover(e, True))
-            widget.bind("<Leave>", lambda _e, e=entry: self._hover(e, False))
+            widget.bind("<Enter>", lambda _e, i=index: self._light(i))
+            widget.bind("<Leave>", lambda _e, i=index: self._unlight(i))
             widget.bind("<Button-1>", lambda _e, i=index: self._activate(i))
-        frame.bind("<Return>", lambda _e, i=index: self._activate(i))
-        frame.bind("<space>", lambda _e, i=index: self._activate(i))
-        frame.bind("<FocusIn>", lambda _e, e=entry: self._hover(e, True))
-        frame.bind("<FocusOut>", lambda _e, e=entry: self._hover(e, False))
         return frame
 
     def _icon(self, parent, key):
@@ -358,19 +360,37 @@ class Launcher(tk.Tk):
                            fill=THEME["text"], font=(self.font, 28, "bold"))
         return canvas
 
-    def _hover(self, entry, on):
+    def _light(self, index):
+        """Make tile `index` the one that looks picked (None: none). The mouse and the arrow
+        keys share this one light, so two tiles never look picked at once."""
         t = THEME
         if self.busy:
             return
-        bg = t["panel_hi"] if on else t["panel"]
-        entry["frame"].configure(highlightbackground=t["amber"] if on else t["border"])
-        for widget in entry["parts"]:
-            widget.configure(bg=bg)
+        self.lit = index
+        for i, entry in enumerate(self.tiles):
+            on = i == index
+            ring = t["amber"] if on else t["border"]
+            entry["frame"].configure(highlightbackground=ring, highlightcolor=ring)
+            for widget in entry["parts"]:
+                widget.configure(bg=t["panel_hi"] if on else t["panel"])
 
-    def _move_focus(self, step):
-        focused = self.focus_get()
-        index = next((i for i, e in enumerate(self.tiles) if e["frame"] is focused), 0)
-        self.tiles[(index + step) % len(self.tiles)]["frame"].focus_set()
+    def _unlight(self, index):
+        """The mouse left tile `index`: put its light out, unless another tile has it."""
+        if self.lit == index:
+            self._light(None)
+
+    def _step(self, step):
+        """Arrow keys: light the next tile; with none lit, the first (or the last going left)."""
+        if self.lit is None:
+            index = 0 if step > 0 else len(self.tiles) - 1
+        else:
+            index = (self.lit + step) % len(self.tiles)
+        self._light(index)
+        return "break"                  # Tab must not move the focus as well
+
+    def _activate_lit(self):
+        if self.lit is not None:
+            self._activate(self.lit)
 
     # ------------------------------------------------------------- actions
     def _activate(self, index):
