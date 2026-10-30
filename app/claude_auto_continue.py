@@ -42,7 +42,7 @@ except ImportError:
         "Claude Auto-Resume", 0x10)
     sys.exit(1)
 
-VERSION = "v.0.42069"        # shown in the window's top-left corner, beside the wordmark
+VERSION = "v.0.7"            # shown in the window's top-left corner, beside the wordmark
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(APP_DIR)  # Main.bat's folder: the settings and the logs live there
 CONFIG_PATH = os.path.join(ROOT_DIR, "auto_continue_config.json")
