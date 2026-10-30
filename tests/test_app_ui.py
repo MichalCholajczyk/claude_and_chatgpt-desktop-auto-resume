@@ -13,7 +13,7 @@ from unittest.mock import patch
 import claude_auto_continue as app
 import chatgpt_auto_continue as gpt
 from session_automation import SessionState
-from test_support import calm_desk
+from .test_support import calm_desk
 
 
 def setUpModule():

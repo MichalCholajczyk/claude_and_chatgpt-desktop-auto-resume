@@ -44,8 +44,9 @@ except ImportError:
 
 VERSION = "v.0.42069"        # shown in the window's top-left corner, beside the wordmark
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(APP_DIR, "auto_continue_config.json")
-LOG_PATH = os.path.join(APP_DIR, "auto_continue.log")
+ROOT_DIR = os.path.dirname(APP_DIR)  # Main.bat's folder: the settings and the logs live there
+CONFIG_PATH = os.path.join(ROOT_DIR, "auto_continue_config.json")
+LOG_PATH = os.path.join(ROOT_DIR, "auto_continue.log")
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32

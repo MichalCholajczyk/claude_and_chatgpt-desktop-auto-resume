@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 import chatgpt_auto_continue as gpt
 from chatgpt_automation import (ChatGPTEngine, ChatGPTUI, discover, signals, transcript)
 from session_automation import Node, WindowHidden, content_hidden
-from test_support import calm_desk
+from .test_support import calm_desk
 
 
 def setUpModule():

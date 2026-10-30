@@ -6,9 +6,10 @@ no wrinkles left" (both). A tile starts the matching Auto-Resume as its own prog
 and closes the picker. Both programs can run side by side: they take turns at the
 keyboard (input_lock.py).
 
-The tile pictures ship in assets/, so every copy of the program shows them, whether or
-not the apps (or Pillow) are installed. tools/make_app_icons.py drew the ChatGPT and
-Claude ones from the apps' own icons; their logos only name the app a tile starts.
+The tile pictures ship in app/assets/, so every copy of the program shows them, whether
+or not the apps (or Pillow) are installed. tools/pictures/make_app_icons.py drew the
+ChatGPT and Claude ones from the apps' own icons; their logos only name the app a tile
+starts.
 """
 import ctypes
 import ctypes.wintypes

@@ -30,10 +30,10 @@ import claude_auto_continue as app
 from chatgpt_automation import ChatGPTEngine
 from input_guard import InputPaused
 from session_automation import LOADING, ClaudeUI, Node, Pane, SessionEngine, SessionState, discover, signals
-from test_chatgpt import FakeLog, FixtureUI as ChatGPTFixtureUI, Window as ChatGPTWindow
-from test_new_claude_ui import mode_switch, session_rail
-from test_sessions import NOW, FakeQuota, FixtureUI, node, observed, pane
-from test_support import calm_desk
+from .test_chatgpt import FakeLog, FixtureUI as ChatGPTFixtureUI, Window as ChatGPTWindow
+from .test_new_claude_ui import mode_switch, session_rail
+from .test_sessions import NOW, FakeQuota, FixtureUI, node, observed, pane
+from .test_support import calm_desk
 
 
 def setUpModule():

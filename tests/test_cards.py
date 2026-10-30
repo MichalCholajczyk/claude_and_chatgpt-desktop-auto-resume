@@ -16,8 +16,8 @@ from unittest.mock import patch
 import claude_auto_continue as app
 from session_automation import (MAX_STARTS, ClaudeUI, SessionEngine, SessionState, next_step_in,
                                 session_offer_in, signals)
-from test_sessions import NOW, FakeQuota, FixtureUI, node, observed, pane
-from test_support import calm_desk
+from .test_sessions import NOW, FakeQuota, FixtureUI, node, observed, pane
+from .test_support import calm_desk
 
 
 def setUpModule():

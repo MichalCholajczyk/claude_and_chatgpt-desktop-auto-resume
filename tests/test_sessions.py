@@ -9,7 +9,7 @@ import claude_auto_continue as app
 from session_automation import (Node, Pane, SessionEngine, SessionState, ClaudeUI,
                                 choose_reset, discover, final_limit_card, question_in,
                                 signals, usage_meter)
-from test_support import calm_desk
+from .test_support import calm_desk
 
 
 def setUpModule():

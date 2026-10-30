@@ -4,7 +4,7 @@
 bottom-bar usage meter. Rects below are the real values captured live from
 the window where the bug happened (handle 67336, rect 1273,0 .. 3847,1399).
 
-Run:  py test_usage_meter.py
+Run:  py -m tests.test_usage_meter
 """
 import types
 

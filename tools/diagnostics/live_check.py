@@ -6,15 +6,16 @@ conversation's bar shows. The first thing to run when a new app version changes 
 Read-only: nothing is clicked, typed or sent, and no conversation text is printed (titles,
 button labels and the meter's own label are).
 
-    py -3 tools/live_check.py            # both apps
-    py -3 tools/live_check.py claude     # one of them
-    py -3 tools/live_check.py chatgpt
+    py -3 tools/diagnostics/live_check.py            # both apps
+    py -3 tools/diagnostics/live_check.py claude     # one of them
+    py -3 tools/diagnostics/live_check.py chatgpt
 """
 import os
 import queue
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "app"))
 
 import chatgpt_auto_continue as gpt                 # noqa: E402
 import chatgpt_automation as gpt_ui                 # noqa: E402

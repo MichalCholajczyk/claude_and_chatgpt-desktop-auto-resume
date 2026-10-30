@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for the pure detection helpers (no UI Automation needed).
 
-Run:  py test_detection.py
+Run:  py -m tests.test_detection
 """
 
 import datetime as dt

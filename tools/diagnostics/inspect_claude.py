@@ -1,10 +1,14 @@
 """Read-only accessibility diagnostic; omits conversation text by default."""
 import json
+import os
 import queue
 import sys
 
-import claude_auto_continue as app
-from session_automation import discover, signals
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "app"))
+
+import claude_auto_continue as app  # noqa: E402
+from session_automation import discover, signals  # noqa: E402
 
 
 def inspect():

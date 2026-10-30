@@ -1,17 +1,20 @@
 """Read-only check of what ChatGPT Auto-Resume sees in the ChatGPT window.
 
-py inspect_chatgpt.py            conversations, composer state and limit signals (nothing is sent anywhere)
-py inspect_chatgpt.py --usage    also open the profile menu -> "Usage remaining" and print the rows
-py inspect_chatgpt.py --dump     also write the window's accessibility tree to chatgpt_tree.txt
-                                 (it contains the conversation's text: share it only if you want to)
+py tools/diagnostics/inspect_chatgpt.py            conversations, composer state and limit signals (nothing is sent anywhere)
+py tools/diagnostics/inspect_chatgpt.py --usage    also open the profile menu -> "Usage remaining" and print the rows
+py tools/diagnostics/inspect_chatgpt.py --dump     also write the window's accessibility tree to chatgpt_tree.txt
+                                                   (it contains the conversation's text: share it only if you want to)
 """
 import json
 import os
 import queue
 import sys
 
-import chatgpt_auto_continue as gpt
-from chatgpt_automation import (APP_TITLES, HEADER_BAND, composer_box, discover, document_title,
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "app"))
+
+import chatgpt_auto_continue as gpt  # noqa: E402
+from chatgpt_automation import (APP_TITLES, HEADER_BAND, composer_box, discover, document_title,  # noqa: E402
                                 last_turn, signals)
 
 
@@ -72,7 +75,7 @@ def main():
             if not panes:
                 info["why_no_conversation"] = why_no_conversation(root)
             if "--dump" in sys.argv:
-                path = os.path.join(gpt.app.APP_DIR, "chatgpt_tree.txt" if len(windows) == 1 else f"chatgpt_tree_{hwnd}.txt")
+                path = os.path.join(gpt.app.ROOT_DIR, "chatgpt_tree.txt" if len(windows) == 1 else f"chatgpt_tree_{hwnd}.txt")
                 dump(root, path)
                 info["dump"] = path
             if "--usage" in sys.argv:

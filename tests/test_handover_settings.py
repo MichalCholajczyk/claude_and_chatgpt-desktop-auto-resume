@@ -11,9 +11,9 @@ from unittest.mock import patch
 import claude_auto_continue as app
 import handover
 from session_automation import ClaudeUI, Pane, chat_settings
-from test_handover import FlowUI
-from test_sessions import node, pane
-from test_support import calm_desk
+from .test_handover import FlowUI
+from .test_sessions import node, pane
+from .test_support import calm_desk
 
 
 def setUpModule():

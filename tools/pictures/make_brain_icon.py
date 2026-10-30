@@ -1,5 +1,5 @@
-"""Draw assets/brain.png: a perfectly smooth brain (no wrinkles), for the launcher's
-"My brain has no wrinkles left" tile. Needs Pillow; run once: py tools/make_brain_icon.py
+"""Draw app/assets/brain.png: a perfectly smooth brain (no wrinkles), for the launcher's
+"My brain has no wrinkles left" tile. Needs Pillow; run once: py tools/pictures/make_brain_icon.py
 """
 import os
 
@@ -80,7 +80,8 @@ def main():
     canvas.alpha_composite(Image.merge("RGBA", (*Image.new("RGB", (W, W), (255, 255, 255)).split(), spark)))
 
     out = canvas.resize((SIZE, SIZE), Image.LANCZOS)
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "brain.png")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, "app", "assets", "brain.png")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     out.save(path, optimize=True)
     print("wrote", path)

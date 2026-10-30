@@ -1,14 +1,19 @@
 """Opt-in smoke checks against an open ChatGPT window. No messages are sent.
 
-Run `py test_live_chatgpt.py` for discovery, `--usage` to open the profile menu and
-read "Usage remaining" (the menu is closed again), `--composer-and-restore` to type
-literal text into an idle empty composer and clear it without sending.
+Run `py tests/live/test_live_chatgpt.py` for discovery, `--usage` to open the profile
+menu and read "Usage remaining" (the menu is closed again), `--composer-and-restore` to
+type literal text into an idle empty composer and clear it without sending.
 """
 import argparse
+import os
 import queue
+import sys
 
-import chatgpt_auto_continue as gpt
-from chatgpt_automation import composer_box, discover, signals, SEND
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "app"))
+
+import chatgpt_auto_continue as gpt  # noqa: E402
+from chatgpt_automation import composer_box, discover, signals, SEND  # noqa: E402
 
 
 def main():

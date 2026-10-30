@@ -1,9 +1,9 @@
-"""Draw assets/chatgpt.png and assets/claude.png, the launcher's ChatGPT and Claude tiles,
-from the icons of the apps installed on this PC (their Microsoft Store packages).
+"""Draw app/assets/chatgpt.png and app/assets/claude.png, the launcher's ChatGPT and Claude
+tiles, from the icons of the apps installed on this PC (their Microsoft Store packages).
 
 The pictures ship with the repository, so every copy of Auto-Resume shows them, with or
 without the apps and with or without Pillow. Run this again only when an app changes its
-icon. Needs Pillow:  py tools/make_app_icons.py
+icon. Needs Pillow:  py tools/pictures/make_app_icons.py
 
 The logos are OpenAI's and Anthropic's; the launcher uses them only to name the app each
 tile starts.
@@ -13,7 +13,8 @@ import winreg
 
 from PIL import Image
 
-ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ASSETS = os.path.join(ROOT, "app", "assets")
 SIZE = 300           # px, like brain.png: the launcher shows 150 px (halved without Pillow)
 
 PACKAGES_KEY = (r"Software\Classes\Local Settings\Software\Microsoft\Windows"

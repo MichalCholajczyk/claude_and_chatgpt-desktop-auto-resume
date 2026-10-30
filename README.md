@@ -29,7 +29,7 @@ The interface is bilingual — **English / Polish**, switchable with the EN/PL
 toggle in the top-right corner (English by default). The log follows the toggle
 too, including the lines written before you switched.
 
-![Claude Auto-Resume waiting for a limit to reset in one conversation while it watches another](docs/screenshot.png)
+![Claude Auto-Resume waiting for a limit to reset in one conversation while it watches another](docs/screenshots/screenshot.png)
 
 *The screenshots show sample conversations.*
 
@@ -183,9 +183,9 @@ big tiles:
 | **Claude** | Claude Auto-Resume |
 | **My brain has no wrinkles left** *(launch both and use both)* | both, side by side |
 
-![The picker: ChatGPT, Claude, or both](docs/launcher.png)
+![The picker: ChatGPT, Claude, or both](docs/screenshots/launcher.png)
 
-Click a tile or press **1**, **2** or **3**. The pictures ship with the program (`assets/`), so every copy shows them, with or
+Click a tile or press **1**, **2** or **3**. The pictures ship with the program (`app/assets/`), so every copy shows them, with or
 without the apps or Pillow installed. A tile whose program is already open brings
 that window forward instead of opening a second copy, and if the app a tile
 watches is minimized, the picker puts it back on screen first (a minimized window
@@ -195,9 +195,9 @@ Prefer to do it by hand?
 
 ```powershell
 py -m pip install --user uiautomation
-py launcher.py                 # the picker
-py claude_auto_continue.py     # Claude Auto-Resume
-py chatgpt_auto_continue.py    # ChatGPT Auto-Resume
+py app/launcher.py                 # the picker
+py app/claude_auto_continue.py     # Claude Auto-Resume
+py app/chatgpt_auto_continue.py    # ChatGPT Auto-Resume
 ```
 
 ---
@@ -316,7 +316,7 @@ then click **Read chats**. After starting a new conversation, **Refresh** also
 updates the list.
 
 One copy of Auto-Resume watches one Claude window and its splits. For separate
-Claude windows, run a copy for each window (`run.bat` or `py claude_auto_continue.py`).
+Claude windows, run a copy for each window (`run.bat` or `py app/claude_auto_continue.py`).
 Two copies never watch the same window: a new copy picks a window no other copy
 watches, and starting to watch — or **Resume now…** — on a window another copy
 already watches is refused with a line in the log.
@@ -490,7 +490,7 @@ summary in the log the usual request goes out.
 Its settings appear on the **Settings** tab, in a group of their own, once the
 option is ticked — and each has a **?** that explains it in plain words:
 
-![The Settings tab with the handover group and the explanation of the plan folder](docs/settings.png)
+![The Settings tab with the handover group and the explanation of the plan folder](docs/screenshots/settings.png)
 
 **Context threshold** takes `700k`, `0.7M`, `700000` or `70%` (a share of that
 model's window). Very low values are clamped — a fresh conversation would be over
@@ -511,7 +511,7 @@ you write replaces their wording only: the file name, the marker line and the
 paths are always added by the tool, so an edit cannot break the agreement it
 relies on. **Restore defaults** brings the built-in texts back.
 
-![The two handover messages, with a note on what each is for](docs/messages.png)
+![The two handover messages, with a note on what each is for](docs/screenshots/messages.png)
 
 The log records every step, e.g.
 `Onboarding: context 712k / 1M (71%) — stopping the work and asking for a handover.`
@@ -552,7 +552,7 @@ The same window, settings and safety rules, pointed at the **ChatGPT desktop
 app** (the Windows app with Codex). It watches **Codex** conversations — the ones
 that count against the limit shown under **Usage remaining**.
 
-![ChatGPT Auto-Resume: the 5-hour window is used up, the conversation resumes a minute after it resets](docs/chatgpt.png)
+![ChatGPT Auto-Resume: the 5-hour window is used up, the conversation resumes a minute after it resets](docs/screenshots/chatgpt.png)
 
 How it decides when to resume:
 
@@ -706,11 +706,11 @@ seen here (last text: …)".** The first means the tool can't find the open
 conversation (its title and composer) in the window; the second that the limit
 is used up but the conversation's last text is not the stop notice — the log
 quotes that text. A new ChatGPT version may lay the page out differently. Run
-`py inspect_chatgpt.py` with the conversation open: it prints what the tool sees
-(`limit`, `candidate`, the last texts, or why no conversation was found);
-`py inspect_chatgpt.py --dump` also writes the page structure to
-`chatgpt_tree.txt` (it contains the conversation's text — share it only if you
-want to).
+`py tools/diagnostics/inspect_chatgpt.py` with the conversation open: it prints
+what the tool sees (`limit`, `candidate`, the last texts, or why no conversation
+was found); `py tools/diagnostics/inspect_chatgpt.py --dump` also writes the page
+structure to `chatgpt_tree.txt` beside `Main.bat` (it contains the conversation's
+text — share it only if you want to).
 
 **A new or older conversation is missing.** Click **Refresh** or **Read chats**.
 The tool reads the sidebar entries Claude has loaded. Open the conversation or
@@ -838,7 +838,7 @@ rate-limit snapshots and usage-limit rejections are parsed.
   and values, so the window can show it again in the other language; the program's
   own error messages are keys too, and ChatGPT's usage rows are named by the tool
   (*5-hour*, *weekly*) rather than by ChatGPT, whose labels follow its own language.
-- **The picker** (`launcher.py`) shows pictures from `assets/`. It takes each app's
+- **The picker** (`launcher.py`) shows pictures from `app/assets/`. It takes each app's
   largest window, skipping click-through overlays (Claude draws one over the whole
   screen while it drives the computer), brings a minimized one back without taking
   the focus, and rearranges the two apps only when one hides the other.
@@ -854,20 +854,37 @@ rate-limit snapshots and usage-limit rejections are parsed.
 
 ## Development
 
-- `py -m unittest` runs the tests. They never touch a real window, the mouse or your
-  settings and logs.
-- `py test_live_claude.py` / `py test_live_chatgpt.py` check a real Claude / ChatGPT
-  window. They send nothing; they click or type only with an explicit
-  `--…-and-restore` option, and put back what they changed.
-- `py inspect_claude.py` / `py inspect_chatgpt.py` / `py tools/probe_ui.py` print what
-  the tool sees in a window — the first step when a new app version changes its
-  layout. Conversation text is left out.
-- `py tools/live_check.py` goes through every open conversation in Claude and ChatGPT and
-  prints what the tool reads there: the limit and wrap-up signals, a question or
-  permission card, the context and the model, effort and permission mode. It only reads.
-- `py tools/readme_screenshots.py` draws the screenshots in `docs/` from sample
-  conversations; `tools/make_app_icons.py` and `tools/make_brain_icon.py` draw the
-  picker's pictures.
+Where things are:
+
+```text
+Main.bat, run.bat      start the picker / Claude Auto-Resume
+app/                   the program: launcher.py (the picker), claude_auto_continue.py,
+                       chatgpt_auto_continue.py and the modules they share
+app/assets/            the picker's pictures
+tests/                 the tests; tests/live/ checks a real Claude / ChatGPT window
+tools/diagnostics/     print what the tool sees in a window
+tools/pictures/        draw the picker's pictures and the README's screenshots
+docs/screenshots/      the README's screenshots
+```
+
+Your settings (`*_config.json`) and logs (`*.log`) are written beside `Main.bat`;
+git leaves them out.
+
+- `py -m unittest` runs the tests (one file: `py -m unittest tests.test_sessions`).
+  They never touch a real window, the mouse or your settings and logs.
+- `py tests/live/test_live_claude.py` / `py tests/live/test_live_chatgpt.py` check a
+  real Claude / ChatGPT window. They send nothing; they click or type only with an
+  explicit `--…-and-restore` option, and put back what they changed.
+- `py tools/diagnostics/inspect_claude.py` / `py tools/diagnostics/inspect_chatgpt.py` /
+  `py tools/diagnostics/probe_ui.py` print what the tool sees in a window — the first
+  step when a new app version changes its layout. Conversation text is left out.
+- `py tools/diagnostics/live_check.py` goes through every open conversation in Claude
+  and ChatGPT and prints what the tool reads there: the limit and wrap-up signals, a
+  question or permission card, the context and the model, effort and permission mode.
+  It only reads.
+- `py tools/pictures/readme_screenshots.py` draws the screenshots in
+  `docs/screenshots/` from sample conversations; `tools/pictures/make_app_icons.py`
+  and `tools/pictures/make_brain_icon.py` draw the picker's pictures.
 
 ---
 
@@ -875,6 +892,6 @@ rate-limit snapshots and usage-limit rejections are parsed.
 
 MIT — do whatever you want with it.
 
-The ChatGPT and Claude logos in `assets/` are trademarks of OpenAI and Anthropic;
+The ChatGPT and Claude logos in `app/assets/` are trademarks of OpenAI and Anthropic;
 the launcher shows them only to name the app each tile starts
-(`tools/make_app_icons.py` drew them from the apps' own icons).
+(`tools/pictures/make_app_icons.py` drew them from the apps' own icons).

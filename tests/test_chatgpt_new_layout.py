@@ -11,8 +11,8 @@ from unittest.mock import patch
 import chatgpt_auto_continue as gpt
 import handover
 from chatgpt_automation import discover, gpt_settings
-from test_chatgpt import Window, composer, node
-from test_support import calm_desk
+from .test_chatgpt import Window, composer, node
+from .test_support import calm_desk
 
 
 def setUpModule():

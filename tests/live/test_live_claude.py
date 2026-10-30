@@ -1,13 +1,18 @@
 """Opt-in smoke checks against an open Claude window. No messages are sent.
 
-Run `py test_live_claude.py` for discovery, or add `--select-and-restore`
+Run `py tests/live/test_live_claude.py` for discovery, or add `--select-and-restore`
 to select a recommended answer, check Submit, and restore the selection.
 """
 import argparse
+import os
 import queue
+import sys
 
-import claude_auto_continue as app
-from session_automation import discover, question_in, signals
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "app"))
+
+import claude_auto_continue as app  # noqa: E402
+from session_automation import discover, question_in, signals  # noqa: E402
 
 
 def main():

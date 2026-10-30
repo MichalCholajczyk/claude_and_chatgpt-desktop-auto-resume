@@ -2,7 +2,7 @@
 sample conversations, so no chat of yours ends up on GitHub.
 
 Nothing is read from Claude or ChatGPT, nothing is clicked or typed, and neither your
-settings nor your logs are touched. Needs Pillow:  py tools/readme_screenshots.py
+settings nor your logs are touched. Needs Pillow:  py tools/pictures/readme_screenshots.py
 """
 import ctypes
 import ctypes.wintypes
@@ -13,8 +13,8 @@ import tempfile
 import time
 from unittest.mock import patch
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "app"))
 
 from PIL import ImageGrab  # noqa: E402
 
@@ -23,7 +23,7 @@ import claude_auto_continue as app  # noqa: E402
 import launcher  # noqa: E402
 from strings import Text  # noqa: E402
 
-DOCS = os.path.join(ROOT, "docs")
+DOCS = os.path.join(ROOT, "docs", "screenshots")
 NOW = dt.datetime.now().replace(microsecond=0)
 
 

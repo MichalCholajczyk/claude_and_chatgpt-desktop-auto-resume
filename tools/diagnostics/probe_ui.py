@@ -6,12 +6,12 @@ conversation" button, the control naming the project) and the pause has to recog
 the "… is using your computer" overlay. This prints their real names, so the code can
 match them instead of guessing. Conversation text is never printed.
 
-    py -3 tools/probe_ui.py claude                 # controls outside the transcript
-    py -3 tools/probe_ui.py claude "usage|context" # ...matching a pattern
-    py -3 tools/probe_ui.py chatgpt "projekt|project"
-    py -3 tools/probe_ui.py overlays               # top-level windows of both apps
-    py -3 tools/probe_ui.py overlays --watch 25    # ...sampled for N seconds
-    py -3 tools/probe_ui.py claude --open-new      # clicks "New", then prints the pane
+    py -3 tools/diagnostics/probe_ui.py claude                 # controls outside the transcript
+    py -3 tools/diagnostics/probe_ui.py claude "usage|context" # ...matching a pattern
+    py -3 tools/diagnostics/probe_ui.py chatgpt "projekt|project"
+    py -3 tools/diagnostics/probe_ui.py overlays               # top-level windows of both apps
+    py -3 tools/diagnostics/probe_ui.py overlays --watch 25    # ...sampled for N seconds
+    py -3 tools/diagnostics/probe_ui.py claude --open-new      # clicks "New", then prints the pane
 
 Everything reads the window through UI Automation. `--open-new` is the one exception:
 it clicks, because the new-conversation screen cannot be seen any other way.
@@ -24,7 +24,8 @@ import re
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "app"))
 
 import claude_auto_continue as app                     # noqa: E402
 import chatgpt_auto_continue as gpt                     # noqa: E402

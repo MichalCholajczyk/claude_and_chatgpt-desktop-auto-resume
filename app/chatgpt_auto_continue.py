@@ -28,8 +28,8 @@ from chatgpt_limits import PERCENT, parse_usage_rows
 
 auto, user32 = app.auto, app.user32
 
-CONFIG_PATH = os.path.join(app.APP_DIR, "chatgpt_auto_continue_config.json")
-LOG_PATH = os.path.join(app.APP_DIR, "chatgpt_auto_continue.log")
+CONFIG_PATH = os.path.join(app.ROOT_DIR, "chatgpt_auto_continue_config.json")
+LOG_PATH = os.path.join(app.ROOT_DIR, "chatgpt_auto_continue.log")
 
 # Codex's context window is about 258k tokens, so a threshold in tokens borrowed from
 # Claude (700k) would never be reached: here the default is a share of the window.

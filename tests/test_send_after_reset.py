@@ -2,7 +2,7 @@
 
 At reset + 60s the banner is normally gone. Its disappearance must not cancel
 an armed continuation or redirect it to the newly active conversation.
-Run: py test_send_after_reset.py
+Run: py -m unittest tests.test_send_after_reset
 """
 import datetime as dt
 import queue
@@ -10,8 +10,8 @@ import unittest
 
 import claude_auto_continue as app
 from session_automation import SessionEngine, SessionState
-from test_sessions import FixtureUI, observed
-from test_support import calm_desk
+from .test_sessions import FixtureUI, observed
+from .test_support import calm_desk
 
 
 def setUpModule():

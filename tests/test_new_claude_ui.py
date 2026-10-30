@@ -18,8 +18,8 @@ import claude_auto_continue as app
 from quota_log import QuotaLog
 from session_automation import (ClaudeUI, SessionEngine, SessionState, WindowHidden, allow_name, discover,
                                 final_limit_card, last_reply_text, permission_in, question_in, signals)
-from test_sessions import LIMIT_CARD, FakeQuota, message, node, pane
-from test_support import calm_desk
+from .test_sessions import LIMIT_CARD, FakeQuota, message, node, pane
+from .test_support import calm_desk
 
 
 def setUpModule():
@@ -717,11 +717,11 @@ class NewSessionScreenTests(unittest.TestCase):
 
 
 class LiveCheckTests(unittest.TestCase):
-    """tools/live_check.py prints what the program reads, never the conversation's text."""
+    """tools/diagnostics/live_check.py prints what the program reads, never the conversation's text."""
 
     def setUp(self):
         spec = importlib.util.spec_from_file_location(
-            "live_check", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "live_check.py"))
+            "live_check", os.path.join(app.ROOT_DIR, "tools", "diagnostics", "live_check.py"))
         self.tool = importlib.util.module_from_spec(spec)
         with patch.object(sys, "path", list(sys.path)):
             spec.loader.exec_module(self.tool)

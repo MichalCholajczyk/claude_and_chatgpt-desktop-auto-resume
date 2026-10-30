@@ -18,9 +18,9 @@ import claude_auto_continue as app
 import handover
 from codex_log import CodexLog
 from session_automation import ClaudeUI, SessionState, signals, usage_meter
-from test_chatgpt import Window as ChatWindow
-from test_sessions import message, node, pane
-from test_support import calm_desk
+from .test_chatgpt import Window as ChatWindow
+from .test_sessions import message, node, pane
+from .test_support import calm_desk
 
 SUMMARY = ("Zatrzymałem się w bezpiecznym miejscu.\n\n**Zrobione:** 7 z 9.\n"
            "**Zostało:** changelog i `C:\\docs\\plan.md`.")

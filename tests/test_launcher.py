@@ -228,17 +228,17 @@ class PictureTests(unittest.TestCase):
             ignored = subprocess.run(["git", "check-ignore", "-q", launcher.icon_path(key)],
                                      cwd=launcher.APP_DIR, capture_output=True)
             self.assertEqual(ignored.returncode, 1, key)          # 1: not ignored
-        with open(os.path.join(launcher.APP_DIR, ".gitattributes"), encoding="utf-8") as f:
+        with open(os.path.join(os.path.dirname(launcher.APP_DIR), ".gitattributes"), encoding="utf-8") as f:
             self.assertIn("*.png binary", f.read())
 
 
 @unittest.skipUnless(importlib.util.find_spec("PIL"), "the icon tool needs Pillow")
 class IconToolTests(unittest.TestCase):
-    """tools/make_app_icons.py, which drew the ChatGPT and Claude pictures."""
+    """tools/pictures/make_app_icons.py, which drew the ChatGPT and Claude pictures."""
 
     def setUp(self):
         spec = importlib.util.spec_from_file_location(
-            "make_app_icons", os.path.join(launcher.APP_DIR, "tools", "make_app_icons.py"))
+            "make_app_icons", os.path.join(os.path.dirname(launcher.APP_DIR), "tools", "pictures", "make_app_icons.py"))
         self.tool = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.tool)
 

@@ -10,8 +10,8 @@ import claude_auto_continue as app
 import session_automation
 from session_automation import (ClaudeUI, SessionEngine, SessionState, allow_name, button_label,
                                 permission_in, signals)
-from test_sessions import NOW, FakeQuota, FixtureUI, claude_question, node, observed, pane
-from test_support import calm_desk
+from .test_sessions import NOW, FakeQuota, FixtureUI, claude_question, node, observed, pane
+from .test_support import calm_desk
 
 
 def setUpModule():

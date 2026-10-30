@@ -10,5 +10,5 @@ if errorlevel 1 (
 )
 
 rem launch the picker without console window if possible (pyw); with console window if needed (py)
-start "" pyw -3 launcher.py
-if errorlevel 1 py -3 launcher.py
+start "" pyw -3 app\launcher.py
+if errorlevel 1 py -3 app\launcher.py

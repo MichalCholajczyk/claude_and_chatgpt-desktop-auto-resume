@@ -10,5 +10,5 @@ if errorlevel 1 (
 )
 
 rem launch without console window if possible (pyw); launch with console window if needed (py)
-start "" pyw -3 claude_auto_continue.py
-if errorlevel 1 py -3 claude_auto_continue.py
+start "" pyw -3 app\claude_auto_continue.py
+if errorlevel 1 py -3 app\claude_auto_continue.py
