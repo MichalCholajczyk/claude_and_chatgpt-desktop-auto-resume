@@ -2163,6 +2163,12 @@ class App(tk.Tk):
                 self.lbl_caption.config(text=self._T("cap_no_window"))
             elif self.last_status == "hidden":
                 self.lbl_caption.config(text=self._T("cap_hidden"))
+            elif self.state_info.get("unavailable"):
+                # One line: the first title, cut short, and how many more.
+                lost = self.state_info["unavailable"]
+                chat = lost[0] if len(lost[0]) <= 40 else lost[0][:39].rstrip() + "…"
+                self.lbl_caption.config(text=self._T("cap_unavailable" if len(lost) == 1 else "cap_unavailable_more",
+                                                     chat=chat, n=len(lost) - 1))
             elif self.usage.get("session"):
                 self.lbl_caption.config(
                     text=self._T("cap_guarding",

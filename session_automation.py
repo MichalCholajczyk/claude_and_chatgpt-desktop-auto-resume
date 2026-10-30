@@ -51,6 +51,11 @@ SHOW_SIDEBAR_LABELS = {"show sidebar", "pokaż pasek boczny", "pokaż pasek bocz
 ENVIRONMENT = re.compile(r"^Environment:\s*(?P<name>.+?)\s*$", re.I)
 NEW_TITLE_WAIT_S = 40
 SECOND_LOOK_S = 1.0         # before an empty page counts as a covered window
+# Claude 4.29 draws a conversation opened from the sidebar, and the panel beside it, before
+# its transcript, whose place meanwhile says "Loading session" (role=status). Reads after
+# the click: four to find the conversation, the rest while its transcript loads.
+LOADING = "Loading session"
+OPEN_READS = 10
 # Buttons of the permission card ("Allow Claude to fetch …?") end with their key digit,
 # e.g. "Allow once 2" (captured 25.09); key names are stripped too, should a version
 # spell them out. The allow buttons in order of preference.
@@ -71,6 +76,17 @@ STARTED_ROW = re.compile(r" Started (?:by Claude from|from a suggestion in) ")
 # ...the same line under the row's title names the conversation it was started from, in full
 # (20.10), whoever started it: this program, you, or Claude itself.
 STARTED_FROM = re.compile(r"^Started (?:by Claude from|from a suggestion in) (?P<parent>.+)$")
+# Claude 4.29 lists those sessions under the row of the one that started them, and that row's
+# button holds one more button, "Hide nested sessions <title>" ("Show …" once folded, 30.10).
+NESTED_TOGGLES = ("Hide nested sessions ", "Show nested sessions ")
+# What the window shows beside a conversation: the sidebar lists other sessions, the session
+# details describe its folder, and a page the app shows (an artifact, the browser pane) is a
+# web page's, whose "Try again" or "Stop" is the page's own (30.10).
+BESIDE = {"chat messages", "sidebar", "session details", "artifacts"}
+# The panel beside the conversation draws each tile (Preview, Artifacts, Changes, Terminal …)
+# as a region of its own, holding Claude's own cards too: a stopped preview says "Nothing
+# listening on localhost:5173" over a "Retry" (4.29).
+LANDMARKS = {"region", "complementary"}
 # What a row's status bar says of a session that needs no watching: nothing, or a finished
 # turn nobody has read yet (20.10). "Running" and "Needs input" are the other kinds.
 SETTLED = {"", "unread response"}
@@ -137,7 +153,40 @@ class Pane:
     prompt: Node
 
     def ui_nodes(self):
-        return [n for n in self.root.walk() if not n.inside("chat messages")]
+        """The conversation's own controls: neither its transcript nor anything beside it.
+        27.10 two conversations at work got "Server error — retry scheduled" while their
+        transcripts showed no error."""
+        column = self.column()
+        around = set(column.ancestors()) if column is not None else set()
+        return [n for n in self.root.walk() if not self.beside(n, column, around)]
+
+    def column(self):
+        """The smallest part of the window that holds both the composer and a transcript (its
+        own is the nearest), or None without a transcript to tell."""
+        feeds = [n for n in self.root.walk() if n.name.casefold() == "chat messages"]
+        lines = {a for feed in feeds for a in (feed, *feed.ancestors())}
+        return next((a for a in self.prompt.ancestors() if a in lines), None)
+
+    def beside(self, node, column=None, around=()):
+        tile = False
+        for ancestor in node.ancestors():
+            if ancestor is column:
+                return False
+            if ancestor is self.root:
+                return tile
+            # The window's own page holds the pane; a document inside it is another page.
+            if ancestor.type == "DocumentControl" or ancestor.name.casefold() in BESIDE:
+                return True
+            # A landmark that holds the conversation's column is no tile beside it.
+            if column is not None and ancestor.role in LANDMARKS and ancestor not in around:
+                tile = True
+        return tile
+
+
+def loading(pane):
+    """True while the conversation still loads its transcript: nothing of it can be read
+    yet, while the panel beside it already can."""
+    return pane.column() is None and any(n.name.strip() == LOADING for n in pane.ui_nodes())
 
 
 def rename_title(node):
@@ -202,7 +251,12 @@ def discover(root):
                            n.type in ("ButtonControl", "HyperlinkControl") and
                            (n.name == title or n.name.endswith(" " + title) or
                             n.name.startswith(title + " ")) and
-                           not n.name.startswith("More options for ")]
+                           not n.name.startswith("More options for ") and
+                           # 27.10 this one made the row of a session that had started
+                           # others look like two, and the session vanished from the list.
+                           n.name not in {toggle + title for toggle in NESTED_TOGGLES}]
+                # Any other control inside the row's own button belongs to that row too.
+                matches = [n for n in matches if not any(a in matches for a in n.ancestors())]
                 if matches:
                     row = matches[0] if len(matches) == 1 else None
                     break
@@ -493,7 +547,7 @@ def context_from_rail(pane):
     (15.10): "Context 44%" while its section is folded, "45% used" and "453.6k / 1M" once it
     is open. None when the panel is hidden or shows no context (an idle conversation)."""
     share = tokens = None
-    for n in pane.ui_nodes():
+    for n in pane.root.walk():
         if not n.inside("session details"):
             continue
         name = n.name.strip()
@@ -710,7 +764,23 @@ class ClaudeUI:
             raise RuntimeError("Control is unavailable")
         self.clicks += 1
         with self.worker.guard.sending():
-            node.control.Click(simulateMove=False)
+            node.control.Click(x=self.free_spot(node), simulateMove=False)
+
+    @staticmethod
+    def free_spot(node):
+        """Where to click a control that holds buttons of its own, as x from its left edge;
+        None for its middle. The "Hide nested sessions" button of a 4.29 sidebar row sits
+        right after the title, under the row's middle for a short title or a wide sidebar,
+        and a click there would fold the list instead of opening the conversation."""
+        left, top, right, bottom = node.rect
+        y = top + (bottom - top) // 2
+        inner = [n.rect for n in node.walk() if n is not node and n.type == "ButtonControl" and n.visible]
+
+        def free(x):
+            return not any(l <= x < r and t <= y < b for l, t, r, b in inner)
+        if free(left + (right - left) // 2):
+            return None
+        return next((x - left for x in range(left + 8, right, 4) if free(x)), None)
 
     def press(self, keys, wait=0.1):
         """Send keys to whatever has the focus, and record them as our own input."""
@@ -735,7 +805,9 @@ class ClaudeUI:
             switches = [n for n in root.walk() if n.inside("sidebar") and (
                 (n.type == "ButtonControl" and (n.name == label or n.name.startswith(label + ","))) or
                 (n.type == "RadioButtonControl" and n.inside("mode") and mode_kind(n.name) == kind))]
-            if len(switches) == 1:
+            # The mode already chosen shows nothing new (27.10: "Code" was clicked on every
+            # scan of a conversation the sidebar did not list).
+            if len(switches) == 1 and not self.selected(switches[0]):
                 self.click(switches[0])
                 time.sleep(0.8)
                 root = self.snapshot()
@@ -746,7 +818,10 @@ class ClaudeUI:
         self.click(rows[0]["node"])
         # Navigation is asynchronous. Verify the requested full title and its
         # own composer, never assume that a successful click opened the chat.
-        for _ in range(4):
+        found = None
+        for attempt in range(OPEN_READS):
+            if found is None and attempt == 4:
+                break
             time.sleep(0.4)
             try:
                 panes, _ = discover(self.snapshot())
@@ -754,8 +829,10 @@ class ClaudeUI:
                 continue          # the page is being rebuilt while the chat opens
             matches = [p for p in panes if p.key == key]
             if len(matches) == 1:
-                return matches[0]
-        return None
+                found = matches[0]
+                if not loading(found):
+                    return found
+        return found
 
     @staticmethod
     def value(node):
@@ -842,6 +919,8 @@ class ClaudeUI:
         pane = self.resolve(key)
         if pane is None:
             raise RuntimeError("Selected conversation is missing or ambiguous")
+        if loading(pane):
+            raise RuntimeError("Conversation still loading; no action taken")
         state = signals(pane, detect_limit_banner)
         if state["question"] or state["permission"] or state["busy"]:
             return "busy"
@@ -1384,6 +1463,7 @@ class SessionState:
     offer_id: str = ""          # the new-session card already pressed or left alone
     box_id: str = ""            # the same for the box a turn ends with
     working: bool = False       # Stop was on screen at the last scan
+    lost: bool = False          # the last scan could not reach the conversation
 
 
 class SessionEngine:
@@ -1456,7 +1536,10 @@ class SessionEngine:
             rows.append(dict(item, phase=phase, due=state.due, attempts=state.attempts,
                              notice=state.notice))
         self.worker.emit("chats", rows)
-        pending = [s for s in self.sessions.values() if s.phase in ("waiting", "verifying") and s.due]
+        # Nothing can be done for a conversation the last scan could not reach, so its time is
+        # no next attempt: overdue, it held the header at 00:00:00 until Stop (27.10).
+        lost = [key for key, s in self.sessions.items() if s.lost]
+        pending = [s for s in self.sessions.values() if s.phase in ("waiting", "verifying") and s.due and not s.lost]
         nearest = min(pending, key=lambda s: s.due) if pending else None
         self.worker.reset_at = nearest.reset if nearest else None
         self.worker.send_at = nearest.due if nearest else None
@@ -1465,7 +1548,9 @@ class SessionEngine:
                  "PAUSED" if pause else "ARMED" if nearest else "MONITORING")
         self.worker.emit("state", dict(state=shown, reset_at=self.worker.reset_at, send_at=self.worker.send_at,
                                        pause_reason=pause,
-                                       start_until=getattr(self.worker, "start_until", None)))
+                                       start_until=getattr(self.worker, "start_until", None),
+                                       unavailable=[self.catalog.get(key, {}).get("title") or key.split(":", 1)[-1]
+                                                    for key in lost]))
 
     def reset(self):
         self.sessions.clear()
@@ -1556,6 +1641,9 @@ class SessionEngine:
         try:
             panes = self.refresh()
             self.last_scan_error = ""
+            # The window could be read: the header drops an old "covered" or "can't see it",
+            # also when no conversation can be found in it.
+            self.worker.emit("status", "ok")
         except Exception as exc:
             self.next_scan = time.monotonic() + self.worker.cfg["scan_interval_s"]
             hidden = isinstance(exc, WindowHidden)
@@ -1588,13 +1676,35 @@ class SessionEngine:
         finally:
             self.publish()
 
+    def find(self, key, state):
+        """The conversation's pane for this scan, or None, noted as unavailable. One that
+        cannot be found, or whose row cannot be clicked, counts as lost: the header counts
+        down to no attempt for it (27.10)."""
+        before, state.lost = state.lost, True
+        try:
+            pane = self.ui.resolve(key, navigate=self.worker.cfg.get("watch_scope") == "selected")
+        except Exception as exc:
+            # Only a row Claude shows as off screen or disabled keeps it out of reach. Else the
+            # scan was put off: someone at the mouse, a command of yours, a page rebuilt.
+            if str(exc) != "Control is unavailable":
+                state.lost = before
+            raise
+        if pane is None:
+            self.note(key, state, "unavailable")
+            return None
+        state.lost = False
+        if state.notice == "unavailable":
+            state.notice = state.notice_label = ""      # found again: its row stops saying so
+        return pane
+
     def scan_one(self, key, state, now):
         """Observe one conversation and act on it (called with the input lock held)."""
         from claude_auto_continue import detect_limit_banner, parse_reset_time
-        pane = self.ui.resolve(key, navigate=self.worker.cfg.get("watch_scope") == "selected")
+        pane = self.find(key, state)
         if pane is None:
-            self.note(key, state, "unavailable")
             return
+        if loading(pane):
+            return          # its transcript is still loading: the next scan reads it
         observed = signals(pane, detect_limit_banner)
         self.worker.emit("status", "ok")
         context = observed["context"]
@@ -1836,7 +1946,9 @@ class SessionEngine:
             if observed["limit"]:
                 state.reason, state.reset, state.since, state.clear_scans = "limit", None, now, 0
                 state.wrap_up = bool(observed.get("wrap_up") and not observed.get("card"))
-            elif cfg.get("retry_api_errors") and (observed["error"] or observed["retry"]):
+            # An error that shows while Claude still works is none of ours: Claude Code
+            # retries by itself, and Stop is there until the turn ends.
+            elif cfg.get("retry_api_errors") and (observed["error"] or observed["retry"]) and not observed["busy"]:
                 state.reason = "api"
                 state.due = now + dt.timedelta(seconds=min(900, cfg.get("api_retry_wait_s", 30) * 2 ** state.attempts))
                 self.note(key, state, "waiting_api")

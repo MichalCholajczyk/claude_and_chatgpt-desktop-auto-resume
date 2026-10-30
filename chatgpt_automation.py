@@ -717,9 +717,8 @@ class ChatGPTEngine(SessionEngine):
         return blocked and (until is None or until > now)
 
     def scan_one(self, key, state, now):
-        pane = self.ui.resolve(key, navigate=self.worker.cfg.get("watch_scope") == "selected")
+        pane = self.find(key, state)
         if pane is None:
-            self.note(key, state, "unavailable")
             return
         observed = signals(pane, now, blocked=self.account_blocked(now))
         if observed["candidate"] and time.monotonic() >= self.candidate_due.get(key, 0):

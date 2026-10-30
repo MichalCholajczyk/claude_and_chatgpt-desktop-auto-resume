@@ -304,6 +304,12 @@ checked ones, the new session among them, and the log says so:
 `Research: also watching the new session “Tests”`. Uncheck it and it stays out
 until the next run.
 
+Since Claude 4.29 the sessions a conversation started are listed under it in the
+sidebar, and its row has a **Hide nested sessions** button. The conversation that
+started them is watched like any other, and the tool never presses that button.
+A folded group hides its sessions from the sidebar, so the tool can't open them
+until you unfold it again.
+
 The list includes chats currently loaded in Claude's sidebar, including pinned
 chats when visible. To add an older chat, open it or expand its sidebar section,
 then click **Read chats**. After starting a new conversation, **Refresh** also
@@ -326,6 +332,10 @@ option off to keep using your message after a reset.
 **Retry API and server errors** is on by default. When Claude stops with a
 server error, the tool clicks **Try again** if available, or sends your message.
 The first retry is after 30 seconds; later attempts wait longer, up to 15 minutes.
+An error shown while Claude is still working is left alone: Claude Code retries by
+itself, and the turn hasn't stopped. Only the conversation's own error and button
+count. A **Retry** in the panel beside it (a stopped preview, an artifact, a page
+in Claude's browser) or in the sidebar isn't the conversation's.
 
 After six unsuccessful attempts, the chat shows **Needs attention**. Fix the
 problem, then use **Resume now…** or stop and start watching to try again.
@@ -711,6 +721,11 @@ select its window again.
 within their Claude mode. If a chat was renamed, check its new entry. Also check
 for an unsent draft or a reply still in progress.
 
+**The header says "Can’t reach “…” — open it in Claude".** The tool can't open that
+conversation: it is missing from the sidebar (archived, renamed, or in a folded
+group of nested sessions), or its row can't be clicked. Open it in Claude and it
+gets its turn again. Until then the header doesn't count down to an attempt for it.
+
 **It keeps saying "couldn't read the usage panel".** The tool needs to click
 the usage meter in Claude's bottom bar, so the Claude window must be visible
 (not minimized) and reasonably sized. Bring the window up and it will recover on
@@ -785,6 +800,11 @@ rate-limit snapshots and usage-limit rejections are parsed.
   writes add up to the tokens in the context.
 - Before acting, the tool checks the conversation and its own message box or
   retry button. It skips missing or ambiguous chats.
+- **Only the conversation's own controls are read**: its transcript and the composer
+  with its bar. The sidebar lists other sessions, the **Session details** panel
+  describes the folder, and the panel beside the conversation shows artifacts, the
+  browser and its previews, web pages with buttons of their own. None of them speaks
+  for the conversation.
 - **A permission prompt is recognized by its buttons**: a card with *Deny* plus
   *Always allow* and/or *Allow once* (their names end with the key digit, e.g.
   `Allow once 2`, or carry a note: *"Always allow , Applies to this session
