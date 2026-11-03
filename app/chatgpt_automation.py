@@ -184,17 +184,18 @@ def gpt_settings(pane):
 # -------------------------------------------------------------------- signals
 
 def transcript(pane):
-    """Conversation nodes in reading order: after the header's title button,
-    before the composer."""
+    """Conversation nodes in reading order, before the composer: after the header's
+    title button, or from the top of the main area when it has none (since 14.10 the
+    title is a text in the window's top bar, outside the main area)."""
     box = composer_box(pane.prompt)
-    nodes, started = [], False
+    nodes = []
     for n in pane.root.walk():
         if n is box:
             break
-        if started:
-            nodes.append(n)
-        elif n.type == "ButtonControl" and n.name.strip() == pane.title:
-            started = True
+        nodes.append(n)
+    for i, n in enumerate(nodes):
+        if n.type == "ButtonControl" and n.name.strip() == pane.title:
+            return nodes[i + 1:]
     return nodes
 
 

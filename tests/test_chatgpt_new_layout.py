@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 import chatgpt_auto_continue as gpt
 import handover
-from chatgpt_automation import discover, gpt_settings
-from .test_chatgpt import Window, composer, node
+from chatgpt_automation import discover, gpt_settings, signals
+from .test_chatgpt import NOW, Window, composer, node
 from .test_support import calm_desk
 
 
@@ -28,6 +28,16 @@ class TitleTests(unittest.TestCase):
         node("Dodaj wspólne auto resume", "TextControl", w.doc, (400, 52, 700, 70))
         panes, _ = discover(w.root)
         self.assertEqual([p.key for p in panes], ["codex:Dodaj wspólne auto resume"])
+
+    def test_the_notice_is_read_with_the_title_in_the_top_bar(self):
+        """Without a title button in the main area the conversation is read from the top
+        of the main area, so the notice that ends it is still a limit."""
+        w = Window(title="Dodaj wspólne auto resume", chats=("Dodaj wspólne auto resume", "Inny czat"))
+        w.title_button.parent.children.remove(w.title_button)
+        node("Dodaj wspólne auto resume", "TextControl", w.doc, (400, 52, 700, 70))
+        w.said("user", "Zbuduj aplikację").said("bot", "Sprawdzam kod.").notice()
+        s = signals(discover(w.root)[0][0], NOW)
+        self.assertEqual((s["limit"], s["reset"], s["busy"]), (True, None, False))
 
     def test_the_new_conversation_screen_is_not_a_conversation_named_after_the_app(self):
         w = Window(title="ChatGPT", chats=("Inny czat",))
